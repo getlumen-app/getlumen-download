@@ -1,0 +1,107 @@
+#!/bin/bash
+# Lumen anonymity + security guard — runs before every `git push`.
+#
+# Purpose: block any push that would leak identifying strings or credentials
+# to the public `getlumen-app/getlumen-download` repo. Lumen is an
+# anonymous, independent open-source project — no contributor names, no
+# brand markers, no real server infrastructure must ever reach the
+# public GitHub source.
+#
+# To enable locally (one-time):
+#   git config core.hooksPath .githooks
+#
+# To skip in an emergency (do NOT do this unless you understand what you
+# are pushing):  git push --no-verify
+#
+# See .claude/rules/lumen-ship-checklist.md Gates 8 and 9 for the full
+# policy this hook enforces.
+
+set -e
+
+RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; RESET='\033[0m'
+
+fail() {
+  echo -e "${RED}✗ anonymity guard blocked push:${RESET} $1" >&2
+  echo "" >&2
+  echo "Either fix the leak, OR bypass with --no-verify (not recommended)." >&2
+  exit 1
+}
+
+# Paths scanned
+PATHS="src/ src-tauri/src/ README.md SECURITY.md package.json *.md *.json *.html *.ts *.tsx *.rs *.css"
+
+# Pattern 1 — Real human / project identity
+IDENT_RE='HWAI|gshevchenko|g-shevchenko|gregory|@shevchenko|humanswith|hwai-ops|tefggl|anthropic\.com|@claude|Claude Opus'
+
+# Pattern 2 — Real server IPs (our actual VPN exits)
+IP_RE='159\.195\.70\.53|193\.188\.23\.152|185\.217\.199\.96|38\.43\.93\.77|37\.1\.193\.147|193\.203\.203\.73|178\.104\.42\.40|92\.63\.225\.189'
+
+# Pattern 3 — Leaked credentials / tokens
+TOKEN_RE='ghp_[a-zA-Z0-9]{36}|ntn_[a-zA-Z0-9]{40,}|cfut_[a-zA-Z0-9]{48,}|sk_[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9]{35}|eyJ[a-zA-Z0-9_-]{60,}'
+
+# Pattern 4 — Hardcoded Lumen version in runtime strings (must use env!("CARGO_PKG_VERSION"))
+RUNTIME_VERSION_RE='user_agent\("Lumen/[0-9]+\.[0-9]+'
+
+HITS=$(mktemp)
+trap "rm -f $HITS" EXIT
+
+grep -rnE "$IDENT_RE" $PATHS \
+  --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist \
+  --exclude-dir=bin --exclude-dir=.git 2>/dev/null \
+  | grep -vE '^[^:]+:[^:]+: *//|^[^:]+:[^:]+: *#' \
+  > "$HITS" || true
+
+if [ -s "$HITS" ]; then
+  echo -e "${RED}Identity / brand markers found in tracked source:${RESET}" >&2
+  cat "$HITS" >&2
+  fail "remove HWAI / humanswith / real names before pushing"
+fi
+
+grep -rnE "$IP_RE" $PATHS \
+  --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist \
+  --exclude-dir=bin --exclude-dir=.git 2>/dev/null > "$HITS" || true
+
+if [ -s "$HITS" ]; then
+  echo -e "${RED}Real production server IPs found in tracked source:${RESET}" >&2
+  cat "$HITS" >&2
+  fail "use RFC 5737 doc ranges (192.0.2.x, 198.51.100.x, 203.0.113.x) in tests"
+fi
+
+grep -rnE "$TOKEN_RE" $PATHS \
+  --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist \
+  --exclude-dir=bin --exclude-dir=.git 2>/dev/null > "$HITS" || true
+
+if [ -s "$HITS" ]; then
+  echo -e "${RED}Leaked credential pattern found:${RESET}" >&2
+  cat "$HITS" >&2
+  fail "rotate the credential immediately AND remove from source"
+fi
+
+grep -rnE "$RUNTIME_VERSION_RE" $PATHS \
+  --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist \
+  --exclude-dir=bin --exclude-dir=.git 2>/dev/null > "$HITS" || true
+
+if [ -s "$HITS" ]; then
+  echo -e "${RED}Hardcoded Lumen/X.Y.Z runtime string:${RESET}" >&2
+  cat "$HITS" >&2
+  fail "use env!(\"CARGO_PKG_VERSION\") or import.meta.env.VITE_APP_VERSION"
+fi
+
+# Pattern 5 — git commit authorship check on the range being pushed
+while read LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+  [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ] && continue
+  if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
+    RANGE="$LOCAL_SHA"
+  else
+    RANGE="$REMOTE_SHA..$LOCAL_SHA"
+  fi
+  BAD_AUTHORS=$(git log --format='%ae' "$RANGE" 2>/dev/null \
+    | grep -iE 'humanswith|anthropic|gshevchenko|shevchenko|claude' || true)
+  if [ -n "$BAD_AUTHORS" ]; then
+    echo -e "${RED}Non-anonymous commit authors in push range ($RANGE):${RESET}" >&2
+    echo "$BAD_AUTHORS" >&2
+    fail "reset to getlumen@proton.me author + rewrite history"
+  fi
+done
+
+echo -e "${GREEN}✓ anonymity guard: all checks passed${RESET}"
