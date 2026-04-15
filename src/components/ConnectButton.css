@@ -1,0 +1,85 @@
+.connect-btn {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  border-radius: var(--radius-circle);
+  border: 2px solid var(--fg-faint);
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform 80ms ease;
+  color: var(--fg-muted);
+}
+
+.connect-btn:hover {
+  transform: scale(1.03);
+}
+
+.connect-btn:active {
+  transform: scale(0.97);
+}
+
+.connect-btn__icon {
+  width: 40px;
+  height: 40px;
+  transition: color var(--dur) var(--ease);
+}
+
+/* ── Disconnected ── */
+.connect-btn--disconnected {
+  border-color: var(--fg-faint);
+  color: var(--fg-muted);
+}
+
+.connect-btn--disconnected:hover {
+  border-color: var(--fg-muted);
+  color: var(--fg-dim);
+}
+
+/* ── Connecting ── */
+.connect-btn--connecting {
+  border-color: var(--status-degraded);
+  color: var(--status-degraded);
+  background: var(--status-degraded-soft);
+}
+
+.connect-btn__pulse {
+  position: absolute;
+  inset: -8px;
+  border-radius: var(--radius-circle);
+  border: 2px solid var(--status-degraded);
+  animation: pulse-ring 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes pulse-ring {
+  0% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.25);
+  }
+}
+
+/* ── Connected ── */
+.connect-btn--connected {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: 0 0 24px var(--accent-bg), 0 0 48px var(--accent-bg);
+}
+
+.connect-btn--connected:hover {
+  border-color: var(--status-down);
+  color: var(--status-down);
+  background: var(--status-down-soft);
+  box-shadow: none;
+}

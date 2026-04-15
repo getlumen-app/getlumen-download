@@ -1,0 +1,135 @@
+.home {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 32px 24px;
+  gap: 12px;
+  /* Allow scroll if window is shorter than content */
+  overflow-y: auto;
+}
+
+/* ── Logo ── */
+.home__logo {
+  color: var(--accent);
+  opacity: 0.85;
+  margin-bottom: 20px;
+  flex-shrink: 0;
+}
+
+/* ── Server info ── */
+.home__server {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--bg-raised);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  cursor: default;
+}
+
+.home__flag {
+  font-size: 16px;
+}
+
+.home__server-name {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.home__latency {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  transition: color var(--dur) var(--ease);
+}
+
+/* ── Connect button area ── */
+.home__button-area {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 0 16px;
+}
+
+/* ── Status text ── */
+.home__status {
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--fg-muted);
+  transition: color var(--dur) var(--ease);
+}
+
+.home__status--connected {
+  color: var(--accent);
+}
+
+.home__status--connecting {
+  color: var(--status-degraded);
+}
+
+/* ── Error ── */
+.home__error {
+  font-size: var(--fs-sm);
+  color: var(--status-down);
+  text-align: center;
+  padding: 4px 16px;
+  max-width: 300px;
+  word-break: break-word;
+}
+
+/* ── Connection time ── */
+.home__time {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  margin-top: -4px;
+}
+
+/* ── Speed indicators ── */
+.home__speed {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 16px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity var(--dur-slow) var(--ease), transform var(--dur-slow) var(--ease);
+}
+
+.home__speed.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.home__speed-item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.home__speed-arrow {
+  font-size: var(--fs-sm);
+  color: var(--fg-faint);
+}
+
+.home__speed-value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.home__speed-unit {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.home__speed-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}

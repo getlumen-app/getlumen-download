@@ -1,0 +1,198 @@
+.key-input {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  padding: 32px;
+  gap: 4px;
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.key-input__logo {
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.key-input__title {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: var(--fs-2xl);
+  font-weight: 400;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.key-input__subtitle {
+  font-size: var(--fs-base);
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+}
+
+.key-input__form {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 260px;
+  margin-top: 24px;
+  gap: 8px;
+}
+
+.key-input__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+
+.key-input__textarea {
+  width: 100%;
+  min-height: 44px;
+  max-height: 220px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.key-input__textarea::placeholder {
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+}
+
+.key-input__textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.key-input__textarea.error {
+  border-color: var(--status-down);
+}
+
+.key-input__hint-detect {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  margin: -2px 0 0 0;
+}
+
+.key-input__hint-detect.warn {
+  color: var(--status-degraded);
+}
+
+.key-input__hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.key-input__error {
+  font-size: var(--fs-xs);
+  color: var(--status-down);
+  margin: -2px 0 0 0;
+}
+
+.key-input__submit {
+  height: 44px;
+  margin-top: 8px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: box-shadow var(--dur) var(--ease), transform 80ms ease;
+}
+
+.key-input__submit:hover {
+  box-shadow: 0 0 24px var(--accent-bg);
+  transform: translateY(-1px);
+}
+
+.key-input__submit:active {
+  transform: scale(0.98);
+}
+
+/* OR divider */
+.key-input__divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 260px;
+  margin: 24px 0 12px;
+  font-size: var(--fs-xs);
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.key-input__divider::before,
+.key-input__divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Telegram CTA (anchor — opens in default browser via Tauri open_url) */
+.key-input__telegram {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 20px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  text-decoration: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: all var(--dur) var(--ease);
+}
+.key-input__telegram:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.key-input__telegram:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.key-input__telegram svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.key-input__hint {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-faint);
+}

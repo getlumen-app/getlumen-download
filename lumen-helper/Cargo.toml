@@ -1,0 +1,28 @@
+[package]
+name = "lumen-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Privileged helper daemon for Lumen VPN — runs sing-box as root for TUN mode"
+license = "GPL-3.0"
+
+[[bin]]
+name = "lumen-helper"
+path = "src/main.rs"
+
+[[bin]]
+name = "lumen-installer"
+path = "src/bin/installer.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "signal", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

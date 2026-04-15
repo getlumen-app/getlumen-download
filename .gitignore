@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+bin/sing-box
+bin/sing-box.exe
+*.dmg
+.env
+.env.*
+*.log
+.DS_Store

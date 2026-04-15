@@ -1,0 +1,174 @@
+/* ══════════════════════════════════════════════
+   Lumen Design System — Pantheon Edition
+   Dark: Warm dark (#181818), cyan accent (#33ffff)
+   Light: Warm off-white (#fafaf9), teal accent (#0891b2)
+   Fonts: Instrument Serif (display) + Inter (UI) + JetBrains Mono (code)
+   ══════════════════════════════════════════════ */
+
+:root {
+  /* ── Fonts ── */
+  --font-display: "Instrument Serif", "Times New Roman", Georgia, serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── Typography scale ── */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 28px;
+  --fs-3xl: 44px;
+
+  /* ── Spacing ── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* ── Radius ── */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
+  --radius-circle: 50%;
+
+  /* ── Motion ── */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur: 220ms;
+  --dur-fast: 120ms;
+  --dur-slow: 350ms;
+
+  /* ── Dark Theme (default) ── */
+  --bg: #181818;
+  --bg-raised: #1e1e1e;
+  --bg-subtle: #252526;
+  --bg-hover: #2d2d30;
+  --bg-input: #212121;
+
+  --fg: #e4e4e4;
+  --fg-dim: #b8b8b8;
+  --fg-muted: #8a8a8a;
+  --fg-faint: #6a6a6a;
+
+  --border: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.22);
+
+  --accent: #33ffff;
+  --accent-dim: rgba(51, 255, 255, 0.7);
+  --accent-bg: rgba(51, 255, 255, 0.10);
+  --accent-text: #0a0a0a;
+
+  --status-healthy: #4ade80;
+  --status-degraded: #fbbf24;
+  --status-down: #f87171;
+  --status-inactive: #858585;
+
+  --status-healthy-soft: rgba(74, 222, 128, 0.10);
+  --status-degraded-soft: rgba(251, 191, 36, 0.10);
+  --status-down-soft: rgba(248, 113, 113, 0.10);
+
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.05), 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #fafaf9;
+  --bg-raised: #ffffff;
+  --bg-subtle: #f5f5f4;
+  --bg-hover: #eeeeec;
+  --bg-input: #ffffff;
+
+  --fg: #0a0a0a;
+  --fg-dim: #44403c;
+  --fg-muted: #78716c;
+  --fg-faint: #a8a29e;
+
+  --border: rgba(10, 10, 10, 0.09);
+  --border-strong: rgba(10, 10, 10, 0.18);
+
+  --accent: #0891b2;
+  --accent-dim: rgba(8, 145, 178, 0.65);
+  --accent-bg: rgba(8, 145, 178, 0.08);
+  --accent-text: #ffffff;
+
+  --status-healthy: #059669;
+  --status-degraded: #d97706;
+  --status-down: #dc2626;
+  --status-inactive: #78716c;
+
+  --status-healthy-soft: rgba(5, 150, 105, 0.08);
+  --status-degraded-soft: rgba(217, 119, 6, 0.08);
+  --status-down-soft: rgba(220, 38, 38, 0.08);
+
+  --shadow: 0 1px 0 rgba(10, 10, 10, 0.04), 0 8px 20px rgba(10, 10, 10, 0.06);
+
+  color-scheme: light;
+}
+
+/* ── Reset ── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button,
+a[href],
+[role="button"] {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input,
+textarea {
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--fg-faint); border-radius: var(--radius-pill); }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-muted); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
