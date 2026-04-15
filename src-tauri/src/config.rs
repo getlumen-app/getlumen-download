@@ -117,7 +117,11 @@ pub fn build_config_from_vless(
 /// - Empty / reserved names fall back to `vless-out`
 /// - Result is lowercased to keep Clash API names consistent
 fn vless_outbound_tag(raw_name: &str) -> String {
-    const RESERVED: &[&str] = &["proxy", "direct", "block", "dns-out", "dns-in", "tun-in", "mixed-in"];
+    const RESERVED: &[&str] = &[
+        "proxy", "proxy-tg", "proxy-yt",
+        "direct", "block",
+        "dns-out", "dns-in", "tun-in", "mixed-in",
+    ];
     let sanitized: String = raw_name
         .chars()
         .map(|c| {
@@ -195,23 +199,64 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
 
     let cache_path = data_dir().join("cache.db");
 
+    // Domains the user's real ISP must resolve & reach directly (RKN-compliant
+    // resolvers, Russian banks, Russian-only services). Keep DNS and routing
+    // rules mirrored — a domain that resolves via direct DNS must also route
+    // via direct, and vice-versa.
+    let russia_direct_domains = serde_json::json!([
+        ".ru", ".su", ".xn--p1ai",
+        ".yandex.net", ".yandex.ru", ".yandex.com",
+        ".yastatic.net", ".yastat.net", ".ya.ru", ".dzen.ru",
+        ".vk.com", ".vk.me", ".mail.ru", ".ok.ru",
+        ".userapi.com", ".vkuservideo.net",
+        ".sberbank.ru", ".tinkoff.ru", ".tbank.ru",
+        ".vtb.ru", ".alfabank.ru", ".gosuslugi.ru"
+    ]);
+
+    // Domains that get their own health-probed proxy group. sing-box runs
+    // a real HTTP probe against the target, not a generic /generate_204 —
+    // an exit that cannot actually reach YouTube is excluded from proxy-yt,
+    // even if it passes a generic latency check.
+    let telegram_domains = serde_json::json!([
+        ".telegram.org", ".t.me", ".telegram.me", ".telesco.pe",
+        ".telegram-cdn.org", ".tdesktop.com"
+    ]);
+    // Known Telegram IP ranges — matched when SNI sniffing fails (e.g. QUIC).
+    let telegram_ip_cidr = serde_json::json!([
+        "91.108.4.0/22", "91.108.8.0/21", "91.108.12.0/22",
+        "91.108.16.0/21", "91.108.56.0/22", "109.239.140.0/24",
+        "149.154.160.0/20", "95.161.64.0/20", "2001:b28:f23d::/48",
+        "2001:b28:f23f::/48", "2001:67c:4e8::/48"
+    ]);
+    let youtube_domains = serde_json::json!([
+        ".youtube.com", ".youtu.be", ".googlevideo.com",
+        ".ytimg.com", ".youtube-nocookie.com"
+    ]);
+
     let mut config = serde_json::json!({
         "log": {"level": "info", "timestamp": true},
         "dns": {
             "servers": [
+                // Default resolver for everything proxied: DoH to Cloudflare,
+                // tunnelled through the VPN. Resistant to local DNS poisoning.
                 {
                     "tag": "dns-proxy",
                     "address": "https://1.1.1.1/dns-query",
                     "detour": "proxy"
                 },
+                // Resolver for Russia-direct domains: DoH to Yandex over the
+                // real ISP. DoH (not plain :53) because DPI tampers with
+                // cleartext DNS even for allowed destinations in some RU networks.
                 {
                     "tag": "dns-direct",
-                    "address": "77.88.8.1",
+                    "address": "https://77.88.8.8/dns-query",
                     "detour": "direct"
                 }
             ],
             "rules": [
-                {"outbound": "any", "server": "dns-direct"}
+                // Russia-direct domains resolve via the local resolver — they
+                // must, since we'll route their traffic via the direct outbound.
+                {"domain_suffix": russia_direct_domains.clone(), "server": "dns-direct"}
             ],
             "final": "dns-proxy",
             "strategy": "ipv4_only"
@@ -222,7 +267,9 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
                     "type": "mixed",
                     "tag": "mixed-in",
                     "listen": "127.0.0.1",
-                    "listen_port": 10808
+                    "listen_port": 10808,
+                    "sniff": true,
+                    "sniff_override_destination": true
                 }
             ]),
             InboundMode::Tun => serde_json::json!([
@@ -236,36 +283,29 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
                     "strict_route": false,
                     "stack": "mixed",
                     "endpoint_independent_nat": true,
-                    "sniff": true
+                    "sniff": true,
+                    // Rewrite connection destination from the DNS-resolved IP
+                    // to the SNI/Host domain after sniffing. Outbound proxies
+                    // then re-resolve at the exit, bypassing locally-poisoned
+                    // DNS for any protocol that exposes a domain (TLS, HTTP).
+                    "sniff_override_destination": true
                 }
             ]),
         },
         "outbounds": [],
         "route": {
             "rules": [
-                {"domain_suffix": [".ru", ".su", ".xn--p1ai"], "outbound": "direct"},
-                {
-                    "domain_suffix": [
-                        ".yandex.net", ".yandex.ru", ".yandex.com",
-                        ".yastatic.net", ".yastat.net", ".ya.ru", ".dzen.ru"
-                    ],
-                    "outbound": "direct"
-                },
-                {
-                    "domain_suffix": [
-                        ".vk.com", ".vk.me", ".mail.ru", ".ok.ru",
-                        ".userapi.com", ".vkuservideo.net"
-                    ],
-                    "outbound": "direct"
-                },
-                {
-                    "domain_suffix": [
-                        ".sberbank.ru", ".tinkoff.ru", ".tbank.ru",
-                        ".vtb.ru", ".alfabank.ru", ".gosuslugi.ru"
-                    ],
-                    "outbound": "direct"
-                }
+                // Russia-direct traffic never touches the VPN.
+                {"domain_suffix": russia_direct_domains.clone(), "outbound": "direct"},
+                // Telegram: match by domain AND by IP range (for QUIC / UDP
+                // cases where sniffing yields no domain).
+                {"domain_suffix": telegram_domains.clone(), "outbound": "proxy-tg"},
+                {"ip_cidr": telegram_ip_cidr.clone(), "outbound": "proxy-tg"},
+                // YouTube and Google video.
+                {"domain_suffix": youtube_domains.clone(), "outbound": "proxy-yt"}
             ],
+            // Everything else (web, messengers, file downloads, ...) goes
+            // through the general-purpose URLTest group.
             "final": "proxy",
             "auto_detect_interface": true
         },
@@ -282,22 +322,49 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
     });
 
     if let Some(arr) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) {
-        // urltest group — auto-selects best proxy
+        // Default URLTest group — probe a reliably-unrestricted endpoint.
+        // "proxy" is the name the UI looks for (App.tsx :141). All user-facing
+        // "Auto Select" logic binds here. Other groups below are routing-only.
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy",
-            "outbounds": proxy_names,
-            "url": "https://www.gstatic.com/generate_204",
-            "interval": "60s",
-            "tolerance": 100
+            "outbounds": proxy_names.clone(),
+            // Small, cache-free payload served by Cloudflare; not regional-blocked.
+            "url": "https://www.cloudflare.com/cdn-cgi/trace",
+            "interval": "30s",
+            "tolerance": 100,
+            "idle_timeout": "30m",
+            "interrupt_exist_connections": false
+        }));
+        // Destination-specific URLTest groups — the probe URL is the actual
+        // service, so an exit that can't reach it is dropped from the group.
+        arr.push(serde_json::json!({
+            "type": "urltest",
+            "tag": "proxy-tg",
+            "outbounds": proxy_names.clone(),
+            "url": "https://web.telegram.org/",
+            "interval": "30s",
+            "tolerance": 100,
+            "idle_timeout": "30m",
+            "interrupt_exist_connections": false
+        }));
+        arr.push(serde_json::json!({
+            "type": "urltest",
+            "tag": "proxy-yt",
+            "outbounds": proxy_names.clone(),
+            "url": "https://www.youtube.com/generate_204",
+            "interval": "30s",
+            "tolerance": 100,
+            "idle_timeout": "30m",
+            "interrupt_exist_connections": false
         }));
 
-        // Server-provided proxy outbounds
+        // Server-provided proxy outbounds.
         for o in outbounds {
             arr.push(o.clone());
         }
 
-        // Standard outbounds
+        // Standard outbounds.
         arr.push(serde_json::json!({"type": "direct", "tag": "direct"}));
         arr.push(serde_json::json!({"type": "block", "tag": "block"}));
     }
@@ -369,22 +436,230 @@ mod tests {
                 tags
             );
         }
-        // Required tags present
-        assert!(tags.contains(&"proxy".to_string()), "missing 'proxy' urltest group");
-        assert!(tags.contains(&"direct".to_string()), "missing 'direct'");
-        assert!(tags.contains(&"block".to_string()), "missing 'block'");
+        // Required tags present — three URLTest groups + direct/block + the VLESS outbound.
+        for required in &["proxy", "proxy-tg", "proxy-yt", "direct", "block"] {
+            assert!(
+                tags.contains(&required.to_string()),
+                "missing required tag {:?}, got={:?}",
+                required,
+                tags
+            );
+        }
         assert!(tags.iter().any(|t| t == "user-1"), "missing vless outbound 'user-1', tags={:?}", tags);
 
-        // The urltest group must reference the vless outbound, not itself.
-        let urltest = outbounds
+        // Each urltest group must reference the vless outbound, not itself.
+        let urltest_tags: Vec<String> = outbounds
             .iter()
-            .find(|o| o.get("type").and_then(|t| t.as_str()) == Some("urltest"))
-            .expect("urltest group present");
-        let inner = urltest
-            .get("outbounds")
-            .and_then(|o| o.as_array())
-            .expect("urltest.outbounds is array");
-        let inner_tags: Vec<&str> = inner.iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(inner_tags, vec!["user-1"], "urltest must wrap vless tag, not 'proxy'");
+            .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("urltest"))
+            .map(|o| o.get("tag").and_then(|t| t.as_str()).unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            urltest_tags,
+            vec!["proxy".to_string(), "proxy-tg".to_string(), "proxy-yt".to_string()],
+            "expected three URLTest groups in order"
+        );
+        for ut in outbounds
+            .iter()
+            .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("urltest"))
+        {
+            let inner = ut
+                .get("outbounds")
+                .and_then(|o| o.as_array())
+                .expect("urltest.outbounds is array");
+            let inner_tags: Vec<&str> = inner.iter().filter_map(|v| v.as_str()).collect();
+            assert_eq!(
+                inner_tags,
+                vec!["user-1"],
+                "urltest {:?} must wrap vless tag, not any group name",
+                ut.get("tag")
+            );
+        }
+    }
+
+    /// A 2.2.4 regression: `{"outbound": "any", "server": "dns-direct"}`
+    /// routed every DNS query through the Russian resolver, which returned
+    /// poisoned IPs for YouTube / Telegram. The fix is a domain-scoped rule
+    /// plus a `final: dns-proxy` fallback. Guard it forever.
+    #[test]
+    fn dns_does_not_catch_all_to_direct() {
+        let raw = "vless://00000000-0000-4000-8000-000000000003@192.0.2.30:443?type=tcp&security=reality&pbk=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC&fp=chrome&sni=google.com&sid=deadbeef&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+
+        let dns = cfg.get("dns").expect("dns section present");
+        let rules = dns.get("rules").and_then(|r| r.as_array()).expect("dns.rules array");
+        for r in rules {
+            if r.get("outbound").and_then(|v| v.as_str()) == Some("any") {
+                panic!("dns.rules contains a catch-all `outbound: any` rule: {:?}", r);
+            }
+        }
+        assert_eq!(
+            dns.get("final").and_then(|v| v.as_str()),
+            Some("dns-proxy"),
+            "dns.final must be dns-proxy so non-Russian domains resolve through the VPN"
+        );
+    }
+
+    /// Russia-direct destinations must be mirrored in BOTH `dns.rules` and
+    /// `route.rules`. A mismatch would cause DNS-over-proxy to leak through
+    /// the VPN or vice-versa — either way breaks split-tunnelling.
+    #[test]
+    fn russia_direct_domains_mirror_dns_and_route() {
+        let raw = "vless://00000000-0000-4000-8000-000000000004@192.0.2.40:443?type=tcp&security=reality&pbk=DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD&fp=chrome&sni=google.com&sid=cafebabe&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+
+        fn direct_domains(section: &serde_json::Value, outbound_field: &str, target: &str) -> Vec<String> {
+            section
+                .get("rules")
+                .and_then(|r| r.as_array())
+                .unwrap()
+                .iter()
+                .filter(|r| r.get(outbound_field).and_then(|v| v.as_str()) == Some(target))
+                .filter_map(|r| r.get("domain_suffix").and_then(|v| v.as_array()))
+                .flatten()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        }
+        let dns_direct: HashSet<String> =
+            direct_domains(cfg.get("dns").unwrap(), "server", "dns-direct").into_iter().collect();
+        let route_direct: HashSet<String> =
+            direct_domains(cfg.get("route").unwrap(), "outbound", "direct").into_iter().collect();
+
+        assert_eq!(
+            dns_direct, route_direct,
+            "dns `server: dns-direct` and route `outbound: direct` domain lists must match exactly"
+        );
+        // Essential Russia-direct anchors.
+        for domain in &[".ru", ".yandex.ru", ".sberbank.ru"] {
+            assert!(
+                dns_direct.contains(*domain),
+                "Russia-direct set missing {:?}",
+                domain
+            );
+        }
+    }
+
+    /// Smart-routing contract: Telegram and YouTube destinations must be
+    /// routed to their dedicated health-probed groups, not the default.
+    #[test]
+    fn route_rules_steer_tg_and_yt_to_dedicated_groups() {
+        let raw = "vless://00000000-0000-4000-8000-000000000005@192.0.2.50:443?type=tcp&security=reality&pbk=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE&fp=chrome&sni=google.com&sid=feedface&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+
+        let route = cfg.get("route").expect("route section");
+        let rules = route.get("rules").and_then(|r| r.as_array()).expect("route.rules");
+
+        fn rule_outbound(
+            rules: &[serde_json::Value],
+            field: &str,
+            value: &str,
+        ) -> Option<String> {
+            for r in rules {
+                let list = r.get(field).and_then(|v| v.as_array());
+                if let Some(arr) = list {
+                    for item in arr {
+                        if item.as_str() == Some(value) {
+                            return r.get("outbound").and_then(|v| v.as_str()).map(str::to_string);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        assert_eq!(
+            rule_outbound(rules, "domain_suffix", ".telegram.org").as_deref(),
+            Some("proxy-tg"),
+            "Telegram domains must route to proxy-tg"
+        );
+        assert_eq!(
+            rule_outbound(rules, "domain_suffix", ".youtube.com").as_deref(),
+            Some("proxy-yt"),
+            "YouTube domains must route to proxy-yt"
+        );
+        // IP-CIDR fallback for Telegram UDP/QUIC (no SNI to sniff).
+        assert!(
+            rules.iter().any(|r| {
+                r.get("outbound").and_then(|v| v.as_str()) == Some("proxy-tg")
+                    && r.get("ip_cidr").is_some()
+            }),
+            "Telegram IP-CIDR fallback rule missing (required for UDP/QUIC)"
+        );
+        assert_eq!(
+            route.get("final").and_then(|v| v.as_str()),
+            Some("proxy"),
+            "route.final must be the generic proxy group"
+        );
+    }
+
+    /// Each URLTest group probes its own target — generic `/generate_204`
+    /// is not enough because an exit that passes latency probes can still
+    /// fail bulk traffic to the real destination.
+    #[test]
+    fn urltest_groups_use_real_world_probes() {
+        let raw = "vless://00000000-0000-4000-8000-000000000006@192.0.2.60:443?type=tcp&security=reality&pbk=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF&fp=chrome&sni=google.com&sid=facefeed&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+
+        let mut by_tag: std::collections::HashMap<String, String> = Default::default();
+        for o in outbounds.iter().filter(|o| {
+            o.get("type").and_then(|t| t.as_str()) == Some("urltest")
+        }) {
+            let tag = o.get("tag").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = o.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            by_tag.insert(tag, url);
+        }
+        assert!(
+            by_tag.get("proxy-tg").map(|u| u.contains("telegram.org")).unwrap_or(false),
+            "proxy-tg probe must target telegram.org, got {:?}",
+            by_tag.get("proxy-tg")
+        );
+        assert!(
+            by_tag.get("proxy-yt").map(|u| u.contains("youtube.com")).unwrap_or(false),
+            "proxy-yt probe must target youtube.com, got {:?}",
+            by_tag.get("proxy-yt")
+        );
+        // Default group — avoid gstatic which sometimes is regional-blocked
+        // and is what the v2.2.4 bug-probe happened to be using.
+        let default_probe = by_tag.get("proxy").cloned().unwrap_or_default();
+        assert!(
+            !default_probe.contains("gstatic.com"),
+            "default proxy group should not probe gstatic (regional-block risk), got {:?}",
+            default_probe
+        );
+        assert!(
+            !default_probe.is_empty(),
+            "default proxy group has no probe URL"
+        );
+    }
+
+    /// TUN inbound must rewrite the destination to the sniffed domain so the
+    /// exit-side resolver can pick the correct IP, bypassing any local DNS
+    /// poisoning. Without this, sing-box carries the DNS-resolved IP — which
+    /// is the exact failure mode we saw in v2.2.4.
+    #[test]
+    fn tun_inbound_overrides_destination_on_sniff() {
+        let raw = "vless://00000000-0000-4000-8000-000000000007@192.0.2.70:443?type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&sni=google.com&sid=deadbeef&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+        let inbounds = cfg.get("inbounds").and_then(|o| o.as_array()).unwrap();
+        let tun = inbounds
+            .iter()
+            .find(|i| i.get("type").and_then(|t| t.as_str()) == Some("tun"))
+            .expect("tun inbound");
+        assert_eq!(
+            tun.get("sniff").and_then(|v| v.as_bool()),
+            Some(true),
+            "sniff must be on so the SNI/Host can be extracted"
+        );
+        assert_eq!(
+            tun.get("sniff_override_destination").and_then(|v| v.as_bool()),
+            Some(true),
+            "sniff_override_destination must be on so poisoned-IP traffic gets\
+             rewritten to the sniffed domain before reaching the outbound"
+        );
     }
 }
+

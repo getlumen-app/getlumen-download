@@ -1,6 +1,6 @@
 [package]
 name = "lumen"
-version = "2.2.4"
+version = "2.3.0"
 description = "Lumen VPN Client"
 authors = []
 license = "GPL-3.0"
