@@ -13,6 +13,56 @@ echo "  Lumen VPN — One-command installer"
 echo "=========================================="
 echo ""
 
+# ─── Pre-install cleanup ───
+# Remove proxy remnants from Hiddify/V2Box/Clash that break Electron apps
+# (Claude Desktop, ChatGPT, etc.) Verified necessary 2026-04-16 on @STmarkml
+echo "[0/5] Cleaning up old VPN proxy settings..."
+
+# 1. System proxy (scutil)
+for iface in Wi-Fi Ethernet "Thunderbolt Bridge" "USB 10/100/1000 LAN"; do
+  networksetup -setsocksfirewallproxystate "$iface" off 2>/dev/null || true
+  networksetup -setwebproxystate "$iface" off 2>/dev/null || true
+  networksetup -setsecurewebproxystate "$iface" off 2>/dev/null || true
+done
+
+# 2. launchctl GUI environment proxy vars
+for var in http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy; do
+  launchctl unsetenv "$var" 2>/dev/null || true
+done
+
+# 3. Shell proxy exports in .zshrc / .bash_profile
+for rc in "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"; do
+  if [ -f "$rc" ] && grep -qi 'proxy' "$rc" 2>/dev/null; then
+    cp "$rc" "${rc}.bak.pre-lumen"
+    sed -i.tmp '/[Pp]roxy/d; /set_proxy/d' "$rc"
+    rm -f "${rc}.tmp"
+    echo "  Cleaned proxy lines from $(basename "$rc")"
+  fi
+done
+
+# 4. Remove set_proxy.sh and LaunchAgent (Hiddify/V2Box auto-restorer)
+[ -f "$HOME/set_proxy.sh" ] && rm -f "$HOME/set_proxy.sh" && echo "  Removed set_proxy.sh"
+if [ -f "$HOME/Library/LaunchAgents/com.proxy.socks.plist" ]; then
+  launchctl unload "$HOME/Library/LaunchAgents/com.proxy.socks.plist" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/com.proxy.socks.plist"
+  echo "  Removed com.proxy.socks LaunchAgent"
+fi
+
+# 5. Flush DNS cache (poisoned entries from ISP)
+dscacheutil -flushcache 2>/dev/null || true
+killall -HUP mDNSResponder 2>/dev/null || true
+
+# 6. Remove old Lumen data (clean state)
+killall Lumen 2>/dev/null || true
+killall sing-box 2>/dev/null || true
+rm -rf "$HOME/Library/Caches/io.getlumen.app"
+rm -rf "$HOME/Library/Application Support/io.getlumen.app"
+rm -rf "$HOME/Library/Saved Application State/io.getlumen.app.savedState"
+rm -rf "$HOME/Library/WebKit/io.getlumen.app"
+
+echo "  ✓ Proxy cleanup done"
+echo ""
+
 # Detect architecture
 ARCH=$(uname -m)
 case "$ARCH" in
