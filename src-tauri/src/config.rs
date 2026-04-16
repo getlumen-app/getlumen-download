@@ -197,6 +197,34 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
         return Err("No proxy outbounds in server config".into());
     }
 
+    // Service-specific URLTest groups (proxy-tg, proxy-yt) must exclude
+    // TCP Reality exits (flow: xtls-rprx-vision). TSPU blocks sustained
+    // traffic on TCP Reality after 15-20KB while tiny URLTest probes pass,
+    // causing the group to select a broken exit. Verified 2026-04-16 on
+    // @STmarkml (Moscow): proxy-tg picked netcup-tcp-reality (216ms probe)
+    // but Telegram MTProto was frozen. General proxy group keeps all exits
+    // for non-RF users where TCP Reality works fine.
+    let service_proxy_names: Vec<String> = outbounds.iter()
+        .filter_map(|o| {
+            let tag = o.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+            let otype = o.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let flow = o.get("flow").and_then(|f| f.as_str()).unwrap_or("");
+            if tag == "direct" || tag == "block" || otype == "direct" || otype == "block" {
+                return None;
+            }
+            if tag.is_empty() { return None; }
+            // Exclude TCP Reality (TSPU-blocked for sustained traffic in RF)
+            if flow.contains("xtls-rprx-vision") { return None; }
+            Some(tag.to_string())
+        })
+        .collect();
+    // Fallback: if ALL exits are TCP Reality, use them anyway (better than empty group)
+    let service_names = if service_proxy_names.is_empty() {
+        &proxy_names
+    } else {
+        &service_proxy_names
+    };
+
     let cache_path = data_dir().join("cache.db");
 
     // Domains the user's real ISP must resolve & reach directly (RKN-compliant
@@ -269,7 +297,7 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
                     "listen": "127.0.0.1",
                     "listen_port": 10808,
                     "sniff": true,
-                    "sniff_override_destination": true
+                    "sniff_override_destination": false
                 }
             ]),
             InboundMode::Tun => serde_json::json!([
@@ -284,11 +312,14 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
                     "stack": "mixed",
                     "endpoint_independent_nat": true,
                     "sniff": true,
-                    // Rewrite connection destination from the DNS-resolved IP
-                    // to the SNI/Host domain after sniffing. Outbound proxies
-                    // then re-resolve at the exit, bypassing locally-poisoned
-                    // DNS for any protocol that exposes a domain (TLS, HTTP).
-                    "sniff_override_destination": true
+                    // Do NOT override destination with sniffed domain.
+                    // DNS resolution already goes through dns-proxy (Cloudflare
+                    // DoH tunnelled via VPN), so resolved IPs are correct.
+                    // override=true breaks Telegram's anti-censorship proxies:
+                    // TG connects to DC IPs with fake SNI (e.g. "www.google.com")
+                    // and override rewrites the destination to Google instead
+                    // of the real DC. Verified 2026-04-16 on @STmarkml (Moscow).
+                    "sniff_override_destination": false
                 }
             ]),
         },
@@ -338,10 +369,11 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
         }));
         // Destination-specific URLTest groups — the probe URL is the actual
         // service, so an exit that can't reach it is dropped from the group.
+        // Uses service_names (excludes TCP Reality) instead of proxy_names.
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy-tg",
-            "outbounds": proxy_names.clone(),
+            "outbounds": service_names.clone(),
             "url": "https://web.telegram.org/",
             "interval": "30s",
             "tolerance": 100,
@@ -351,7 +383,7 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy-yt",
-            "outbounds": proxy_names.clone(),
+            "outbounds": service_names.clone(),
             "url": "https://www.youtube.com/generate_204",
             "interval": "30s",
             "tolerance": 100,
@@ -635,12 +667,16 @@ mod tests {
         );
     }
 
-    /// TUN inbound must rewrite the destination to the sniffed domain so the
-    /// exit-side resolver can pick the correct IP, bypassing any local DNS
-    /// poisoning. Without this, sing-box carries the DNS-resolved IP — which
-    /// is the exact failure mode we saw in v2.2.4.
+    /// TUN inbound must NOT override destination with the sniffed domain.
+    /// DNS resolution goes through dns-proxy (Cloudflare DoH via VPN tunnel)
+    /// so resolved IPs are already correct. override=true breaks Telegram's
+    /// anti-censorship proxies: TG connects to DC IPs with fake SNI
+    /// (e.g. "www.google.com") and override rewrites destination to Google.
+    /// Verified 2026-04-16: @STmarkml Telegram frozen, sing-box connections
+    /// showed host=www.google.com dest=5.28.195.2:5222 (Telegram DC with
+    /// fake SNI being overridden).
     #[test]
-    fn tun_inbound_overrides_destination_on_sniff() {
+    fn tun_inbound_does_not_override_destination() {
         let raw = "vless://00000000-0000-4000-8000-000000000007@192.0.2.70:443?type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&sni=google.com&sid=deadbeef&spx=%2F&flow=xtls-rprx-vision#u";
         let v = crate::vless::parse_vless(raw).expect("parse");
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
@@ -656,9 +692,9 @@ mod tests {
         );
         assert_eq!(
             tun.get("sniff_override_destination").and_then(|v| v.as_bool()),
-            Some(true),
-            "sniff_override_destination must be on so poisoned-IP traffic gets\
-             rewritten to the sniffed domain before reaching the outbound"
+            Some(false),
+            "sniff_override_destination must be OFF — DNS goes through dns-proxy \
+             (correct IPs), and override breaks Telegram anti-censorship (fake SNI)"
         );
     }
 }
