@@ -68,7 +68,15 @@ pub async fn fetch_and_cache_with_mode(
         .no_proxy()
         .build()?;
 
-    let resp = client.get(url).send().await?;
+    let mut resp = client.get(url).send().await?;
+    // Retry once on 403 (Cloudflare KV edge propagation delay) or 5xx.
+    // Verified 2026-04-16: first request after fresh install can hit a cold
+    // KV edge that returns 403; second request 2s later succeeds.
+    if resp.status() == reqwest::StatusCode::FORBIDDEN || resp.status().is_server_error() {
+        log::warn!("Config fetch got {}, retrying in 2s…", resp.status());
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        resp = client.get(url).send().await?;
+    }
     if !resp.status().is_success() {
         return Err(format!("Config server returned {}", resp.status()).into());
     }

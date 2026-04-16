@@ -18,11 +18,11 @@ echo ""
 # (Claude Desktop, ChatGPT, etc.) Verified necessary 2026-04-16 on @STmarkml
 echo "[0/5] Cleaning up old VPN proxy settings..."
 
-# 1. System proxy (scutil)
-for iface in Wi-Fi Ethernet "Thunderbolt Bridge" "USB 10/100/1000 LAN"; do
-  networksetup -setsocksfirewallproxystate "$iface" off 2>/dev/null || true
-  networksetup -setwebproxystate "$iface" off 2>/dev/null || true
-  networksetup -setsecurewebproxystate "$iface" off 2>/dev/null || true
+# 1. System proxy (suppress stdout errors for missing interfaces)
+for iface in Wi-Fi Ethernet "Thunderbolt Bridge"; do
+  networksetup -setsocksfirewallproxystate "$iface" off >/dev/null 2>&1 || true
+  networksetup -setwebproxystate "$iface" off >/dev/null 2>&1 || true
+  networksetup -setsecurewebproxystate "$iface" off >/dev/null 2>&1 || true
 done
 
 # 2. launchctl GUI environment proxy vars
@@ -59,6 +59,8 @@ rm -rf "$HOME/Library/Caches/io.getlumen.app"
 rm -rf "$HOME/Library/Application Support/io.getlumen.app"
 rm -rf "$HOME/Library/Saved Application State/io.getlumen.app.savedState"
 rm -rf "$HOME/Library/WebKit/io.getlumen.app"
+rm -f "$HOME/Library/Preferences/io.getlumen.app.plist"
+rm -rf "$HOME/Library/HTTPStorages/io.getlumen.app"
 
 echo "  ✓ Proxy cleanup done"
 echo ""

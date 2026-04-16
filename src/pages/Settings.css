@@ -306,7 +306,7 @@
   color: var(--fg);
   padding: 8px;
   outline: none;
-  resize: vertical;
+  resize: none;
 }
 
 .profile__add-input:focus {
