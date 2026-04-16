@@ -227,6 +227,22 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
 
     let cache_path = data_dir().join("cache.db");
 
+    // Extract unique server IPs from outbounds → direct route prevents circular
+    // routing and keeps SSH remote-support tunnels alive when TUN is active.
+    let server_ips: std::collections::HashSet<String> = outbounds.iter()
+        .filter_map(|o| {
+            o.get("server").and_then(|s| s.as_str()).map(|s| s.to_string())
+        })
+        .filter(|ip| {
+            // Only IPs, not hostnames (hostnames handled by DNS rules)
+            ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .collect();
+    let server_ip_cidrs: Vec<String> = server_ips.iter()
+        .map(|ip| format!("{}/32", ip))
+        .collect();
+    let server_ip_cidrs = serde_json::json!(server_ip_cidrs);
+
     // Domains the user's real ISP must resolve & reach directly (RKN-compliant
     // resolvers, Russian banks, Russian-only services). Keep DNS and routing
     // rules mirrored — a domain that resolves via direct DNS must also route
@@ -326,6 +342,12 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
         "outbounds": [],
         "route": {
             "rules": [
+                // Direct route for all proxy server IPs extracted from
+                // outbounds. Prevents: (1) circular routing — traffic to a
+                // proxy server going through itself; (2) SSH remote-support
+                // tunnels being intercepted by TUN. IPs are dynamic — derived
+                // from what the config server returns, not hardcoded.
+                {"ip_cidr": server_ip_cidrs.clone(), "outbound": "direct"},
                 // Russia-direct traffic never touches the VPN.
                 {"domain_suffix": russia_direct_domains.clone(), "outbound": "direct"},
                 // Telegram: match by domain AND by IP range (for QUIC / UDP
@@ -356,27 +378,31 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
         // Default URLTest group — probe a reliably-unrestricted endpoint.
         // "proxy" is the name the UI looks for (App.tsx :141). All user-facing
         // "Auto Select" logic binds here. Other groups below are routing-only.
+        // tolerance=200: don't flap between exits for small latency differences
+        // (183ms proxy-moscow vs 233ms netcup-grpc = 50ms diff, both fine).
+        // Higher tolerance → more stable connection, less TSPU attention from
+        // repeated TLS handshakes to different servers.
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy",
             "outbounds": proxy_names.clone(),
-            // Small, cache-free payload served by Cloudflare; not regional-blocked.
             "url": "https://www.cloudflare.com/cdn-cgi/trace",
-            "interval": "30s",
-            "tolerance": 100,
+            "interval": "60s",
+            "tolerance": 200,
             "idle_timeout": "30m",
             "interrupt_exist_connections": false
         }));
         // Destination-specific URLTest groups — the probe URL is the actual
         // service, so an exit that can't reach it is dropped from the group.
         // Uses service_names (excludes TCP Reality) instead of proxy_names.
+        // interval=60s (not 30s) — less probe traffic, less TSPU exposure.
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy-tg",
             "outbounds": service_names.clone(),
             "url": "https://web.telegram.org/",
-            "interval": "30s",
-            "tolerance": 100,
+            "interval": "60s",
+            "tolerance": 200,
             "idle_timeout": "30m",
             "interrupt_exist_connections": false
         }));
@@ -385,8 +411,8 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
             "tag": "proxy-yt",
             "outbounds": service_names.clone(),
             "url": "https://www.youtube.com/generate_204",
-            "interval": "30s",
-            "tolerance": 100,
+            "interval": "60s",
+            "tolerance": 200,
             "idle_timeout": "30m",
             "interrupt_exist_connections": false
         }));
