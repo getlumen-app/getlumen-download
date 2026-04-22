@@ -13,10 +13,53 @@ echo "  Lumen VPN — One-command installer"
 echo "=========================================="
 echo ""
 
-# ─── Pre-install cleanup ───
-# Remove proxy remnants from Hiddify/V2Box/Clash that break Electron apps
-# (Claude Desktop, ChatGPT, etc.) Verified necessary 2026-04-16 on @STmarkml
-echo "[0/5] Cleaning up old VPN proxy settings..."
+# Detect architecture
+ARCH=$(uname -m)
+case "$ARCH" in
+  arm64)  ARCH_SUFFIX="aarch64" ;;
+  x86_64) ARCH_SUFFIX="x86_64" ;;
+  *)
+    echo "✗ Unsupported architecture: $ARCH"
+    exit 1
+    ;;
+esac
+
+# Find DMG URL from release assets (handles version mismatch with tag)
+echo "[1/6] Fetching latest release..."
+RELEASE_JSON=$(curl -sL "https://api.github.com/repos/${REPO}/releases/latest")
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep -E "_${ARCH_SUFFIX}\.dmg" | head -1 | sed 's/.*"browser_download_url": *"\(.*\)"/\1/')
+
+if [ -z "$DOWNLOAD_URL" ]; then
+  echo "✗ Could not find DMG for ${ARCH_SUFFIX} in latest release"
+  exit 1
+fi
+
+DMG_NAME=$(basename "$DOWNLOAD_URL")
+echo "[2/6] Downloading ${DMG_NAME}..."
+TMPDIR_PATH=$(mktemp -d)
+DMG_PATH="${TMPDIR_PATH}/${DMG_NAME}"
+curl -fsSL -o "$DMG_PATH" "$DOWNLOAD_URL"
+
+if [ ! -f "$DMG_PATH" ] || [ ! -s "$DMG_PATH" ]; then
+  echo "✗ Download failed (URL: $DOWNLOAD_URL)"
+  rm -rf "$TMPDIR_PATH"
+  exit 1
+fi
+
+# Verify it's actually a DMG (not HTML 404 page)
+FILE_TYPE=$(file -b "$DMG_PATH")
+if ! echo "$FILE_TYPE" | grep -qiE "zlib|disk image|Apple"; then
+  echo "✗ Downloaded file is not a DMG: $FILE_TYPE"
+  echo "  URL: $DOWNLOAD_URL"
+  echo "  First 200 chars: $(head -c 200 "$DMG_PATH")"
+  rm -rf "$TMPDIR_PATH"
+  exit 1
+fi
+
+# Only after the DMG is staged locally do we touch existing proxy/VPN state.
+# This avoids the self-lockout case where network breaks after cleanup but
+# before the new app has been downloaded.
+echo "[3/6] Cleaning up old VPN proxy settings..."
 
 # 1. System proxy (suppress stdout errors for missing interfaces)
 for iface in Wi-Fi Ethernet "Thunderbolt Bridge"; do
@@ -65,51 +108,8 @@ rm -rf "$HOME/Library/HTTPStorages/io.getlumen.app"
 echo "  ✓ Proxy cleanup done"
 echo ""
 
-# Detect architecture
-ARCH=$(uname -m)
-case "$ARCH" in
-  arm64)  ARCH_SUFFIX="aarch64" ;;
-  x86_64) ARCH_SUFFIX="x86_64" ;;
-  *)
-    echo "✗ Unsupported architecture: $ARCH"
-    exit 1
-    ;;
-esac
-
-# Find DMG URL from release assets (handles version mismatch with tag)
-echo "[1/5] Fetching latest release..."
-RELEASE_JSON=$(curl -sL "https://api.github.com/repos/${REPO}/releases/latest")
-DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep -E "_${ARCH_SUFFIX}\.dmg" | head -1 | sed 's/.*"browser_download_url": *"\(.*\)"/\1/')
-
-if [ -z "$DOWNLOAD_URL" ]; then
-  echo "✗ Could not find DMG for ${ARCH_SUFFIX} in latest release"
-  exit 1
-fi
-
-DMG_NAME=$(basename "$DOWNLOAD_URL")
-echo "[2/5] Downloading ${DMG_NAME}..."
-TMPDIR_PATH=$(mktemp -d)
-DMG_PATH="${TMPDIR_PATH}/${DMG_NAME}"
-curl -fsSL -o "$DMG_PATH" "$DOWNLOAD_URL"
-
-if [ ! -f "$DMG_PATH" ] || [ ! -s "$DMG_PATH" ]; then
-  echo "✗ Download failed (URL: $DOWNLOAD_URL)"
-  rm -rf "$TMPDIR_PATH"
-  exit 1
-fi
-
-# Verify it's actually a DMG (not HTML 404 page)
-FILE_TYPE=$(file -b "$DMG_PATH")
-if ! echo "$FILE_TYPE" | grep -qiE "zlib|disk image|Apple"; then
-  echo "✗ Downloaded file is not a DMG: $FILE_TYPE"
-  echo "  URL: $DOWNLOAD_URL"
-  echo "  First 200 chars: $(head -c 200 "$DMG_PATH")"
-  rm -rf "$TMPDIR_PATH"
-  exit 1
-fi
-
 # Mount DMG
-echo "[3/5] Mounting DMG..."
+echo "[4/6] Mounting DMG..."
 MOUNT_OUTPUT=$(hdiutil attach "$DMG_PATH" -nobrowse -noautoopen 2>&1)
 MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep "/Volumes" | awk '{print $NF}')
 
@@ -124,7 +124,7 @@ if [ -z "$MOUNT_POINT" ] || [ ! -d "$MOUNT_POINT" ]; then
 fi
 
 # Copy app
-echo "[4/5] Installing to ${INSTALL_DIR}..."
+echo "[5/6] Installing to ${INSTALL_DIR}..."
 if [ -d "${INSTALL_DIR}/${APP_NAME}.app" ]; then
   rm -rf "${INSTALL_DIR}/${APP_NAME}.app"
 fi
@@ -132,7 +132,7 @@ cp -R "${MOUNT_POINT}/${APP_NAME}.app" "${INSTALL_DIR}/"
 hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
 
 # We need sudo for: xattr quarantine remove + helper install
-echo "[5/5] Setting up VPN helper for TUN mode (faster, kernel-level routing)"
+echo "[6/6] Setting up VPN helper for TUN mode (faster, kernel-level routing)"
 echo "      You'll be asked for your Mac password (one-time setup)"
 echo ""
 

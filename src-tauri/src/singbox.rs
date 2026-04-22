@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct SingboxManager {
@@ -22,7 +23,10 @@ impl SingboxManager {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&singbox_bin, std::fs::Permissions::from_mode(0o755)).ok();
-            Command::new("xattr").args(["-d", "com.apple.quarantine", &singbox_bin]).output().ok();
+            Command::new("xattr")
+                .args(["-d", "com.apple.quarantine", &singbox_bin])
+                .output()
+                .ok();
         }
 
         // Validate config (env var required for legacy DNS server format support)
@@ -48,10 +52,15 @@ impl SingboxManager {
         let log_path = super::config::data_dir().join("singbox.log");
         let log_file = std::fs::File::create(&log_path)
             .map_err(|e| format!("Cannot create log file: {}", e))?;
-        let log_err = log_file.try_clone()
+        let log_err = log_file
+            .try_clone()
             .map_err(|e| format!("Cannot clone log file: {}", e))?;
 
-        log::info!("Starting sing-box: {} (log: {})", singbox_bin, log_path.display());
+        log::info!(
+            "Starting sing-box: {} (log: {})",
+            singbox_bin,
+            log_path.display()
+        );
 
         #[cfg(unix)]
         {
@@ -136,18 +145,27 @@ impl SingboxManager {
         }
         #[cfg(windows)]
         {
-            Command::new("taskkill").args(["/F", "/IM", "sing-box.exe"]).output().ok();
+            Command::new("taskkill")
+                .args(["/F", "/IM", "sing-box.exe"])
+                .output()
+                .ok();
         }
     }
 
     fn force_kill() {
         #[cfg(unix)]
         {
-            Command::new("pkill").args(["-9", "-f", "sing-box run"]).output().ok();
+            Command::new("pkill")
+                .args(["-9", "-f", "sing-box run"])
+                .output()
+                .ok();
         }
         #[cfg(windows)]
         {
-            Command::new("taskkill").args(["/F", "/IM", "sing-box.exe"]).output().ok();
+            Command::new("taskkill")
+                .args(["/F", "/IM", "sing-box.exe"])
+                .output()
+                .ok();
         }
     }
 
@@ -159,27 +177,8 @@ impl SingboxManager {
 
         // 1. Check next to the app executable (Tauri Resources)
         if let Ok(exe) = std::env::current_exe() {
-            // Tauri bundles resources next to the exe on Windows
-            #[cfg(windows)]
-            {
-                if let Some(dir) = exe.parent() {
-                    let candidate = dir.join(bin_name);
-                    if candidate.exists() {
-                        return Ok(candidate.to_string_lossy().to_string());
-                    }
-                }
-            }
-            // macOS: Resources directory inside .app bundle
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(res) = exe.parent()
-                    .and_then(|p| p.parent())
-                    .map(|p| p.join("Resources").join(bin_name))
-                {
-                    if res.exists() {
-                        return Ok(res.to_string_lossy().to_string());
-                    }
-                }
+            if let Some(candidate) = Self::find_binary_near_exe(&exe, bin_name) {
+                return Ok(candidate.to_string_lossy().to_string());
             }
         }
 
@@ -210,10 +209,68 @@ impl SingboxManager {
 
         Err(format!("{} not found", bin_name).into())
     }
+
+    fn find_binary_near_exe(exe: &Path, bin_name: &str) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join(bin_name);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            for candidate in Self::macos_resource_candidates(exe, bin_name) {
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_resource_candidates(exe: &Path, bin_name: &str) -> [PathBuf; 2] {
+        let resources_dir = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("Resources"))
+            .unwrap_or_default();
+
+        [
+            resources_dir.join("_up_").join("bin").join(bin_name),
+            resources_dir.join(bin_name),
+        ]
+    }
 }
 
 impl Drop for SingboxManager {
     fn drop(&mut self) {
         self.stop().ok();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::SingboxManager;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn macos_prefers_tauri_up_bin_before_legacy_resource_root() {
+        let exe = Path::new("/Applications/Lumen.app/Contents/MacOS/lumen");
+        let candidates = SingboxManager::macos_resource_candidates(exe, "sing-box");
+
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/Applications/Lumen.app/Contents/Resources/_up_/bin/sing-box")
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from("/Applications/Lumen.app/Contents/Resources/sing-box")
+        );
     }
 }

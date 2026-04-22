@@ -2,10 +2,9 @@
 # Lumen anonymity + security guard — runs before every `git push`.
 #
 # Purpose: block any push that would leak identifying strings or credentials
-# to the public `getlumen-app/getlumen-download` repo. Lumen is an
-# anonymous, independent open-source project — no contributor names, no
-# brand markers, no real server infrastructure must ever reach the
-# public GitHub source.
+# to the public `getlumen-app/getlumen-download` repo. The checked-in hook
+# stays generic on purpose; maintainers can extend it locally with private
+# deny-lists that must never be committed.
 #
 # To enable locally (one-time):
 #   git config core.hooksPath .githooks
@@ -30,17 +29,25 @@ fail() {
 # Paths scanned
 PATHS="src/ src-tauri/src/ README.md SECURITY.md package.json *.md *.json *.html *.ts *.tsx *.rs *.css"
 
-# Pattern 1 — Real human / project identity
-IDENT_RE='HWAI|gshevchenko|g-shevchenko|gregory|@shevchenko|humanswith|hwai-ops|tefggl|anthropic\.com|@claude|Claude Opus'
+# Pattern 1 — Generic identity markers that should never appear in an
+# anonymous public repo.
+IDENT_RE='anthropic\.com|@claude|Claude Opus|Co-Authored-By:'
 
-# Pattern 2 — Real server IPs (our actual VPN exits)
-IP_RE='159\.195\.70\.53|193\.188\.23\.152|185\.217\.199\.96|38\.43\.93\.77|37\.1\.193\.147|193\.203\.203\.73|178\.104\.42\.40|92\.63\.225\.189'
+# Pattern 2 — Optional private leak checks, loaded from an untracked file.
+IP_RE=''
 
 # Pattern 3 — Leaked credentials / tokens
 TOKEN_RE='ghp_[a-zA-Z0-9]{36}|ntn_[a-zA-Z0-9]{40,}|cfut_[a-zA-Z0-9]{48,}|sk_[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9]{35}|eyJ[a-zA-Z0-9_-]{60,}'
 
 # Pattern 4 — Hardcoded Lumen version in runtime strings (must use env!("CARGO_PKG_VERSION"))
 RUNTIME_VERSION_RE='user_agent\("Lumen/[0-9]+\.[0-9]+'
+
+# Optional private deny-lists for maintainers. Keep this file untracked.
+PRIVATE_OVERRIDES=".git/info/lumen-private-patterns.sh"
+if [ -f "$PRIVATE_OVERRIDES" ]; then
+  # shellcheck source=/dev/null
+  . "$PRIVATE_OVERRIDES"
+fi
 
 HITS=$(mktemp)
 trap "rm -f $HITS" EXIT
@@ -54,17 +61,19 @@ grep -rnE "$IDENT_RE" $PATHS \
 if [ -s "$HITS" ]; then
   echo -e "${RED}Identity / brand markers found in tracked source:${RESET}" >&2
   cat "$HITS" >&2
-  fail "remove HWAI / humanswith / real names before pushing"
+  fail "remove identity markers before pushing"
 fi
 
-grep -rnE "$IP_RE" $PATHS \
-  --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist \
-  --exclude-dir=bin --exclude-dir=.git 2>/dev/null > "$HITS" || true
+if [ -n "$IP_RE" ]; then
+  grep -rnE "$IP_RE" $PATHS \
+    --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist \
+    --exclude-dir=bin --exclude-dir=.git 2>/dev/null > "$HITS" || true
 
-if [ -s "$HITS" ]; then
-  echo -e "${RED}Real production server IPs found in tracked source:${RESET}" >&2
-  cat "$HITS" >&2
-  fail "use RFC 5737 doc ranges (192.0.2.x, 198.51.100.x, 203.0.113.x) in tests"
+  if [ -s "$HITS" ]; then
+    echo -e "${RED}Real production server IPs found in tracked source:${RESET}" >&2
+    cat "$HITS" >&2
+    fail "use RFC 5737 doc ranges (192.0.2.x, 198.51.100.x, 203.0.113.x) in tests"
+  fi
 fi
 
 grep -rnE "$TOKEN_RE" $PATHS \
@@ -96,7 +105,7 @@ while read LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     RANGE="$REMOTE_SHA..$LOCAL_SHA"
   fi
   BAD_AUTHORS=$(git log --format='%ae' "$RANGE" 2>/dev/null \
-    | grep -iE 'humanswith|anthropic|gshevchenko|shevchenko|claude' || true)
+    | grep -iE 'anthropic|claude' || true)
   if [ -n "$BAD_AUTHORS" ]; then
     echo -e "${RED}Non-anonymous commit authors in push range ($RANGE):${RESET}" >&2
     echo "$BAD_AUTHORS" >&2
