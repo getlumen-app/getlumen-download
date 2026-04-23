@@ -229,7 +229,10 @@ mod tests {
         assert_eq!(v.port, 18241);
         assert_eq!(v.name, "test-reality");
         assert_eq!(v.security, "reality");
-        assert_eq!(v.pbk.as_deref(), Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        assert_eq!(
+            v.pbk.as_deref(),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
         assert_eq!(v.sni.as_deref(), Some("google.com"));
         assert_eq!(v.fp, "chrome");
         assert_eq!(v.sid, "deadbeef");

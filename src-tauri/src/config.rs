@@ -21,7 +21,8 @@ fn platform_data_dir() -> PathBuf {
         dirs::data_local_dir().unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("C:\\Temp"))
-                .join("AppData").join("Local")
+                .join("AppData")
+                .join("Local")
         })
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -30,7 +31,7 @@ fn platform_data_dir() -> PathBuf {
     }
 }
 
-/// Config endpoint URL — injected at build time, fallback to default.
+/// Config endpoint URL — injected at build time, fallback to Lumen config gateway.
 pub fn config_base_url() -> String {
     option_env!("LUMEN_CONFIG_URL")
         .unwrap_or("https://config.getlumen.download")
@@ -68,24 +69,46 @@ pub async fn fetch_and_cache_with_mode(
         .no_proxy()
         .build()?;
 
+    log::info!("Fetching config from: {}", url);
     let mut resp = client.get(url).send().await?;
-    // Retry once on 403 (Cloudflare KV edge propagation delay) or 5xx.
-    // Verified 2026-04-16: first request after fresh install can hit a cold
-    // KV edge that returns 403; second request 2s later succeeds.
-    if resp.status() == reqwest::StatusCode::FORBIDDEN || resp.status().is_server_error() {
-        log::warn!("Config fetch got {}, retrying in 2s…", resp.status());
+    log::info!("Config response: {} (url={})", resp.status(), url);
+    // Retry up to 2 times on 403 (Cloudflare KV edge propagation delay) or 5xx.
+    let mut retries = 0;
+    while (resp.status() == reqwest::StatusCode::FORBIDDEN || resp.status().is_server_error())
+        && retries < 2
+    {
+        retries += 1;
+        log::warn!(
+            "Config fetch got {} (attempt {}), retrying in 2s…",
+            resp.status(),
+            retries
+        );
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         resp = client.get(url).send().await?;
+        log::info!("Retry {} response: {}", retries, resp.status());
     }
     if !resp.status().is_success() {
         return Err(format!("Config server returned {}", resp.status()).into());
     }
 
     let body = resp.text().await?;
-    let server_config: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Invalid config JSON: {}", e))?;
+    let server_config: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid config JSON: {}", e))?;
 
-    let config = build_config_from_server(&server_config, mode)?;
+    // If the server returns a full sing-box config (has dns + inbounds + route),
+    // use it directly — no need to rebuild. This allows the Proteus config server
+    // to ship complete configs (with routing rules, Samokat bypass, etc.).
+    // Otherwise, treat the response as an outbounds-only payload and wrap it.
+    let is_full_config = server_config.get("dns").is_some()
+        && server_config.get("inbounds").is_some()
+        && server_config.get("route").is_some();
+
+    let config = if is_full_config {
+        log::info!("Server returned full sing-box config — using as-is (mode override ignored)");
+        server_config
+    } else {
+        build_config_from_server(&server_config, mode)?
+    };
 
     let final_json = serde_json::to_string_pretty(&config)?;
     let path = match mode {
@@ -93,7 +116,12 @@ pub async fn fetch_and_cache_with_mode(
         InboundMode::Tun => tun_config_file_path(),
     };
     std::fs::write(&path, &final_json)?;
-    log::info!("Config ({:?}) saved to {} ({} bytes)", mode, path.display(), final_json.len());
+    log::info!(
+        "Config ({:?}) saved to {} ({} bytes)",
+        mode,
+        path.display(),
+        final_json.len()
+    );
 
     Ok(final_json)
 }
@@ -126,9 +154,8 @@ pub fn build_config_from_vless(
 /// - Result is lowercased to keep Clash API names consistent
 fn vless_outbound_tag(raw_name: &str) -> String {
     const RESERVED: &[&str] = &[
-        "proxy", "proxy-tg", "proxy-yt",
-        "direct", "block",
-        "dns-out", "dns-in", "tun-in", "mixed-in",
+        "proxy", "proxy-tg", "proxy-yt", "direct", "block", "dns-out", "dns-in", "tun-in",
+        "mixed-in",
     ];
     let sanitized: String = raw_name
         .chars()
@@ -182,13 +209,18 @@ pub async fn save_vless_config(
 /// Build sing-box config from server-provided outbounds.
 /// Server is responsible for all proxy outbounds (IPs, keys, transport).
 /// Client only adds: DNS, inbounds, route rules, urltest group, direct/block.
-fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let outbounds = server.get("outbounds")
+fn build_config_from_server(
+    server: &serde_json::Value,
+    mode: InboundMode,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let outbounds = server
+        .get("outbounds")
         .and_then(|o| o.as_array())
         .ok_or("No outbounds in server config")?;
 
     // Collect proxy outbound names for urltest group
-    let proxy_names: Vec<String> = outbounds.iter()
+    let proxy_names: Vec<String> = outbounds
+        .iter()
         .filter_map(|o| {
             let tag = o.get("tag").and_then(|t| t.as_str()).unwrap_or("");
             let otype = o.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -196,7 +228,9 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
             if tag == "direct" || tag == "block" || otype == "direct" || otype == "block" {
                 return None;
             }
-            if tag.is_empty() { return None; }
+            if tag.is_empty() {
+                return None;
+            }
             Some(tag.to_string())
         })
         .collect();
@@ -212,7 +246,8 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
     // @STmarkml (Moscow): proxy-tg picked netcup-tcp-reality (216ms probe)
     // but Telegram MTProto was frozen. General proxy group keeps all exits
     // for non-RF users where TCP Reality works fine.
-    let service_proxy_names: Vec<String> = outbounds.iter()
+    let service_proxy_names: Vec<String> = outbounds
+        .iter()
         .filter_map(|o| {
             let tag = o.get("tag").and_then(|t| t.as_str()).unwrap_or("");
             let otype = o.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -220,9 +255,13 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
             if tag == "direct" || tag == "block" || otype == "direct" || otype == "block" {
                 return None;
             }
-            if tag.is_empty() { return None; }
+            if tag.is_empty() {
+                return None;
+            }
             // Exclude TCP Reality (TSPU-blocked for sustained traffic in RF)
-            if flow.contains("xtls-rprx-vision") { return None; }
+            if flow.contains("xtls-rprx-vision") {
+                return None;
+            }
             Some(tag.to_string())
         })
         .collect();
@@ -237,18 +276,19 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
 
     // Extract unique server IPs from outbounds → direct route prevents circular
     // routing and keeps SSH remote-support tunnels alive when TUN is active.
-    let server_ips: std::collections::HashSet<String> = outbounds.iter()
+    let server_ips: std::collections::HashSet<String> = outbounds
+        .iter()
         .filter_map(|o| {
-            o.get("server").and_then(|s| s.as_str()).map(|s| s.to_string())
+            o.get("server")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
         })
         .filter(|ip| {
             // Only IPs, not hostnames (hostnames handled by DNS rules)
             ip.chars().all(|c| c.is_ascii_digit() || c == '.')
         })
         .collect();
-    let server_ip_cidrs: Vec<String> = server_ips.iter()
-        .map(|ip| format!("{}/32", ip))
-        .collect();
+    let server_ip_cidrs: Vec<String> = server_ips.iter().map(|ip| format!("{}/32", ip)).collect();
     let server_ip_cidrs = serde_json::json!(server_ip_cidrs);
 
     // Domains the user's real ISP must resolve & reach directly (RKN-compliant
@@ -256,13 +296,28 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
     // rules mirrored — a domain that resolves via direct DNS must also route
     // via direct, and vice-versa.
     let russia_direct_domains = serde_json::json!([
-        ".ru", ".su", ".xn--p1ai",
-        ".yandex.net", ".yandex.ru", ".yandex.com",
-        ".yastatic.net", ".yastat.net", ".ya.ru", ".dzen.ru",
-        ".vk.com", ".vk.me", ".mail.ru", ".ok.ru",
-        ".userapi.com", ".vkuservideo.net",
-        ".sberbank.ru", ".tinkoff.ru", ".tbank.ru",
-        ".vtb.ru", ".alfabank.ru", ".gosuslugi.ru"
+        ".ru",
+        ".su",
+        ".xn--p1ai",
+        ".yandex.net",
+        ".yandex.ru",
+        ".yandex.com",
+        ".yastatic.net",
+        ".yastat.net",
+        ".ya.ru",
+        ".dzen.ru",
+        ".vk.com",
+        ".vk.me",
+        ".mail.ru",
+        ".ok.ru",
+        ".userapi.com",
+        ".vkuservideo.net",
+        ".sberbank.ru",
+        ".tinkoff.ru",
+        ".tbank.ru",
+        ".vtb.ru",
+        ".alfabank.ru",
+        ".gosuslugi.ru"
     ]);
 
     // Domains that get their own health-probed proxy group. sing-box runs
@@ -270,19 +325,52 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
     // an exit that cannot actually reach YouTube is excluded from proxy-yt,
     // even if it passes a generic latency check.
     let telegram_domains = serde_json::json!([
-        ".telegram.org", ".t.me", ".telegram.me", ".telesco.pe",
-        ".telegram-cdn.org", ".tdesktop.com"
+        ".telegram.org",
+        ".t.me",
+        ".telegram.me",
+        ".telesco.pe",
+        ".telegram-cdn.org",
+        ".tdesktop.com"
     ]);
     // Known Telegram IP ranges — matched when SNI sniffing fails (e.g. QUIC).
     let telegram_ip_cidr = serde_json::json!([
-        "91.108.4.0/22", "91.108.8.0/21", "91.108.12.0/22",
-        "91.108.16.0/21", "91.108.56.0/22", "109.239.140.0/24",
-        "149.154.160.0/20", "95.161.64.0/20", "2001:b28:f23d::/48",
-        "2001:b28:f23f::/48", "2001:67c:4e8::/48"
+        "91.108.4.0/22",
+        "91.108.8.0/21",
+        "91.108.12.0/22",
+        "91.108.16.0/21",
+        "91.108.56.0/22",
+        "109.239.140.0/24",
+        "149.154.160.0/20",
+        "95.161.64.0/20",
+        "2001:b28:f23d::/48",
+        "2001:b28:f23f::/48",
+        "2001:67c:4e8::/48"
     ]);
     let youtube_domains = serde_json::json!([
-        ".youtube.com", ".youtu.be", ".googlevideo.com",
-        ".ytimg.com", ".youtube-nocookie.com"
+        ".youtube.com",
+        ".youtu.be",
+        ".googlevideo.com",
+        ".ytimg.com",
+        ".youtube-nocookie.com"
+    ]);
+    // Google ASN15169 IP-CIDR fallback → proxy-yt when SNI sniff misses the
+    // domain (QUIC/alt-svc case: Chrome caches `h3=:443` for googlevideo.com
+    // after first HTTP/2 response, opens UDP 443 to Google CDN IPs without
+    // sniffable SNI; rule by domain_suffix does not fire → connection falls
+    // through to route.final. With IP-CIDR fallback, UDP 443 to Google hits
+    // proxy-yt regardless of sniff result. Mirrors telegram_ip_cidr above.
+    // @voksep 2026-04-22 repro: first YT video buffers, second hangs, page
+    // reload fixes. Server-side mirror landed in template v81 (same CIDRs).
+    let youtube_ip_cidr = serde_json::json!([
+        "142.250.0.0/15",
+        "172.217.0.0/16",
+        "173.194.0.0/16",
+        "216.58.192.0/19",
+        "209.85.128.0/17",
+        "74.125.0.0/16",
+        "64.233.160.0/19",
+        "35.190.0.0/16",
+        "2607:f8b0::/32"
     ]);
 
     let mut config = serde_json::json!({
@@ -362,8 +450,10 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
                 // cases where sniffing yields no domain).
                 {"domain_suffix": telegram_domains.clone(), "outbound": "proxy-tg"},
                 {"ip_cidr": telegram_ip_cidr.clone(), "outbound": "proxy-tg"},
-                // YouTube and Google video.
-                {"domain_suffix": youtube_domains.clone(), "outbound": "proxy-yt"}
+                // YouTube and Google video — by domain (TCP/HTTP-2 with sniff).
+                {"domain_suffix": youtube_domains.clone(), "outbound": "proxy-yt"},
+                // …and by IP for QUIC/UDP cases where sniffing yields no domain.
+                {"ip_cidr": youtube_ip_cidr.clone(), "outbound": "proxy-yt"}
             ],
             // Everything else (web, messengers, file downloads, ...) goes
             // through the general-purpose URLTest group.
@@ -390,15 +480,28 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
         // (183ms proxy-moscow vs 233ms netcup-grpc = 50ms diff, both fine).
         // Higher tolerance → more stable connection, less TSPU attention from
         // repeated TLS handshakes to different servers.
+        //
+        // v2.3.4 defense-in-depth: use service_names (excludes TCP Reality flow
+        // xtls-rprx-vision) for the GENERAL proxy group too, not just proxy-tg
+        // /proxy-yt. TSPU bulk-blocks sustained traffic on xtls-rprx-vision
+        // after 15-20KB while tiny URLTest probes pass, causing urltest to
+        // pick a broken exit for long streams (Claude WebSocket, Discord,
+        // large downloads). Same bug pattern as @STmarkml 2026-04-16 and
+        // @voksep 2026-04-22. service_names falls back to proxy_names if all
+        // exits are Reality (non-RF users with a single TCP Reality exit still
+        // work as before). Server-side mirror landed in template v81.
+        //
+        // interrupt_exist_connections: true ensures new requests don't inherit
+        // a stale-selected exit for 30m after urltest re-probes.
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy",
-            "outbounds": proxy_names.clone(),
+            "outbounds": service_names.clone(),
             "url": "https://www.cloudflare.com/cdn-cgi/trace",
             "interval": "60s",
             "tolerance": 200,
             "idle_timeout": "30m",
-            "interrupt_exist_connections": false
+            "interrupt_exist_connections": true
         }));
         // Destination-specific URLTest groups — the probe URL is the actual
         // service, so an exit that can't reach it is dropped from the group.
@@ -412,7 +515,7 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
             "interval": "60s",
             "tolerance": 200,
             "idle_timeout": "30m",
-            "interrupt_exist_connections": false
+            "interrupt_exist_connections": true
         }));
         arr.push(serde_json::json!({
             "type": "urltest",
@@ -422,7 +525,7 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
             "interval": "60s",
             "tolerance": 200,
             "idle_timeout": "30m",
-            "interrupt_exist_connections": false
+            "interrupt_exist_connections": true
         }));
 
         // Server-provided proxy outbounds.
@@ -435,8 +538,14 @@ fn build_config_from_server(server: &serde_json::Value, mode: InboundMode) -> Re
         arr.push(serde_json::json!({"type": "block", "tag": "block"}));
     }
 
-    log::info!("Built config: {} proxy outbounds",
-        config.get("outbounds").and_then(|o| o.as_array()).map(|a| a.len()).unwrap_or(0));
+    log::info!(
+        "Built config: {} proxy outbounds",
+        config
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    );
 
     Ok(config)
 }
@@ -484,7 +593,10 @@ mod tests {
         let v = crate::vless::parse_vless(raw).expect("parse");
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
 
-        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).expect("outbounds array");
+        let outbounds = cfg
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .expect("outbounds array");
         let mut seen: HashSet<String> = HashSet::new();
         let mut tags: Vec<String> = Vec::new();
         for o in outbounds {
@@ -511,17 +623,30 @@ mod tests {
                 tags
             );
         }
-        assert!(tags.iter().any(|t| t == "user-1"), "missing vless outbound 'user-1', tags={:?}", tags);
+        assert!(
+            tags.iter().any(|t| t == "user-1"),
+            "missing vless outbound 'user-1', tags={:?}",
+            tags
+        );
 
         // Each urltest group must reference the vless outbound, not itself.
         let urltest_tags: Vec<String> = outbounds
             .iter()
             .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("urltest"))
-            .map(|o| o.get("tag").and_then(|t| t.as_str()).unwrap_or("").to_string())
+            .map(|o| {
+                o.get("tag")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
             .collect();
         assert_eq!(
             urltest_tags,
-            vec!["proxy".to_string(), "proxy-tg".to_string(), "proxy-yt".to_string()],
+            vec![
+                "proxy".to_string(),
+                "proxy-tg".to_string(),
+                "proxy-yt".to_string()
+            ],
             "expected three URLTest groups in order"
         );
         for ut in outbounds
@@ -553,10 +678,16 @@ mod tests {
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
 
         let dns = cfg.get("dns").expect("dns section present");
-        let rules = dns.get("rules").and_then(|r| r.as_array()).expect("dns.rules array");
+        let rules = dns
+            .get("rules")
+            .and_then(|r| r.as_array())
+            .expect("dns.rules array");
         for r in rules {
             if r.get("outbound").and_then(|v| v.as_str()) == Some("any") {
-                panic!("dns.rules contains a catch-all `outbound: any` rule: {:?}", r);
+                panic!(
+                    "dns.rules contains a catch-all `outbound: any` rule: {:?}",
+                    r
+                );
             }
         }
         assert_eq!(
@@ -575,7 +706,11 @@ mod tests {
         let v = crate::vless::parse_vless(raw).expect("parse");
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
 
-        fn direct_domains(section: &serde_json::Value, outbound_field: &str, target: &str) -> Vec<String> {
+        fn direct_domains(
+            section: &serde_json::Value,
+            outbound_field: &str,
+            target: &str,
+        ) -> Vec<String> {
             section
                 .get("rules")
                 .and_then(|r| r.as_array())
@@ -588,9 +723,13 @@ mod tests {
                 .collect()
         }
         let dns_direct: HashSet<String> =
-            direct_domains(cfg.get("dns").unwrap(), "server", "dns-direct").into_iter().collect();
+            direct_domains(cfg.get("dns").unwrap(), "server", "dns-direct")
+                .into_iter()
+                .collect();
         let route_direct: HashSet<String> =
-            direct_domains(cfg.get("route").unwrap(), "outbound", "direct").into_iter().collect();
+            direct_domains(cfg.get("route").unwrap(), "outbound", "direct")
+                .into_iter()
+                .collect();
 
         assert_eq!(
             dns_direct, route_direct,
@@ -615,19 +754,21 @@ mod tests {
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
 
         let route = cfg.get("route").expect("route section");
-        let rules = route.get("rules").and_then(|r| r.as_array()).expect("route.rules");
+        let rules = route
+            .get("rules")
+            .and_then(|r| r.as_array())
+            .expect("route.rules");
 
-        fn rule_outbound(
-            rules: &[serde_json::Value],
-            field: &str,
-            value: &str,
-        ) -> Option<String> {
+        fn rule_outbound(rules: &[serde_json::Value], field: &str, value: &str) -> Option<String> {
             for r in rules {
                 let list = r.get(field).and_then(|v| v.as_array());
                 if let Some(arr) = list {
                     for item in arr {
                         if item.as_str() == Some(value) {
-                            return r.get("outbound").and_then(|v| v.as_str()).map(str::to_string);
+                            return r
+                                .get("outbound")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
                         }
                     }
                 }
@@ -670,20 +811,35 @@ mod tests {
         let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
 
         let mut by_tag: std::collections::HashMap<String, String> = Default::default();
-        for o in outbounds.iter().filter(|o| {
-            o.get("type").and_then(|t| t.as_str()) == Some("urltest")
-        }) {
-            let tag = o.get("tag").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let url = o.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        for o in outbounds
+            .iter()
+            .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("urltest"))
+        {
+            let tag = o
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = o
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             by_tag.insert(tag, url);
         }
         assert!(
-            by_tag.get("proxy-tg").map(|u| u.contains("telegram.org")).unwrap_or(false),
+            by_tag
+                .get("proxy-tg")
+                .map(|u| u.contains("telegram.org"))
+                .unwrap_or(false),
             "proxy-tg probe must target telegram.org, got {:?}",
             by_tag.get("proxy-tg")
         );
         assert!(
-            by_tag.get("proxy-yt").map(|u| u.contains("youtube.com")).unwrap_or(false),
+            by_tag
+                .get("proxy-yt")
+                .map(|u| u.contains("youtube.com"))
+                .unwrap_or(false),
             "proxy-yt probe must target youtube.com, got {:?}",
             by_tag.get("proxy-yt")
         );
@@ -725,11 +881,200 @@ mod tests {
             "sniff must be on so the SNI/Host can be extracted"
         );
         assert_eq!(
-            tun.get("sniff_override_destination").and_then(|v| v.as_bool()),
+            tun.get("sniff_override_destination")
+                .and_then(|v| v.as_bool()),
             Some(false),
             "sniff_override_destination must be OFF — DNS goes through dns-proxy \
              (correct IPs), and override breaks Telegram anti-censorship (fake SNI)"
         );
     }
-}
 
+    /// v2.3.4 regression: the general `proxy` urltest group must ALSO exclude
+    /// TCP Reality exits (flow=xtls-rprx-vision), not only proxy-tg/proxy-yt.
+    /// TSPU bulk-blocks sustained traffic on xtls-rprx-vision after 15-20KB
+    /// while tiny URLTest probes pass → urltest picks a broken exit for long
+    /// streams (Claude WebSocket, Discord, large downloads). Same pattern as
+    /// @STmarkml 2026-04-16 and @voksep 2026-04-22. Mixing a TCP Reality exit
+    /// with safer exits (gRPC Reality / HTTPUpgrade / port-443 relay) is ONLY
+    /// safe when the Reality exit is the last resort. Defense-in-depth
+    /// alongside server-side template v81.
+    #[test]
+    fn general_proxy_group_excludes_tcp_reality_when_alternatives_exist() {
+        // Synthetic server payload: one TCP Reality exit (flow=xtls-rprx-vision)
+        // + one gRPC Reality exit (no xtls flow). General `proxy` group must
+        // pick only the gRPC one.
+        let server = serde_json::json!({
+            "outbounds": [
+                {
+                    "type": "vless",
+                    "tag": "tcp-reality-1",
+                    "server": "192.0.2.10",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000001",
+                    "flow": "xtls-rprx-vision"
+                },
+                {
+                    "type": "vless",
+                    "tag": "grpc-reality-1",
+                    "server": "192.0.2.20",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000002"
+                }
+            ]
+        });
+        let cfg = build_config_from_server(&server, InboundMode::Tun).expect("build");
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+        let proxy = outbounds
+            .iter()
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy"))
+            .expect("proxy urltest group");
+        let members: Vec<&str> = proxy
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            !members.contains(&"tcp-reality-1"),
+            "general `proxy` group must NOT include TCP Reality (xtls-rprx-vision) \
+             when safer exits exist. Got members: {:?}. This protects RU users from \
+             TSPU bulk-block on long streams (Claude, Discord, YouTube 2nd video).",
+            members
+        );
+        assert!(
+            members.contains(&"grpc-reality-1"),
+            "general `proxy` group must include the safe gRPC Reality exit, \
+             got members: {:?}",
+            members
+        );
+    }
+
+    /// v2.3.4: when ALL exits are TCP Reality (non-RF user, single Reality
+    /// origin), the general `proxy` group MUST fall back to including them.
+    /// An empty urltest group is worse than a TSPU-vulnerable one — it breaks
+    /// the UI entirely (App.tsx binds "Auto Select" to this group name).
+    #[test]
+    fn general_proxy_group_falls_back_to_tcp_reality_if_only_option() {
+        let server = serde_json::json!({
+            "outbounds": [
+                {
+                    "type": "vless",
+                    "tag": "only-tcp-reality",
+                    "server": "192.0.2.30",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000003",
+                    "flow": "xtls-rprx-vision"
+                }
+            ]
+        });
+        let cfg = build_config_from_server(&server, InboundMode::Tun).expect("build");
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+        let proxy = outbounds
+            .iter()
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy"))
+            .expect("proxy urltest group");
+        let members: Vec<&str> = proxy
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            members,
+            vec!["only-tcp-reality"],
+            "general `proxy` group must fall back to the TCP Reality exit when \
+             no safer alternatives exist (non-RF user with single Reality origin)"
+        );
+    }
+
+    /// v2.3.4: all three URLTest groups must have `interrupt_exist_connections
+    /// = true` so a stale selection does not keep serving new requests after
+    /// the urltest picks a different exit. Matches server-side template v81.
+    /// Without this, @voksep's symptom reproduces on the client fallback path
+    /// (build_config_from_server) even when server sends only outbounds.
+    #[test]
+    fn urltest_groups_interrupt_existing_connections_on_switch() {
+        let raw = "vless://00000000-0000-4000-8000-000000000008@192.0.2.80:443?type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&sni=google.com&sid=deadbeef&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+        for ut in outbounds
+            .iter()
+            .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("urltest"))
+        {
+            let tag = ut.get("tag").and_then(|t| t.as_str()).unwrap_or("?");
+            assert_eq!(
+                ut.get("interrupt_exist_connections")
+                    .and_then(|v| v.as_bool()),
+                Some(true),
+                "urltest group {:?} must have interrupt_exist_connections=true \
+                 (stale exits otherwise serve new requests for 30m after probe \
+                 switches selection). @voksep 2026-04-22, server mirror v81.",
+                tag
+            );
+        }
+    }
+
+    /// v2.3.4: a Google/YouTube IP-CIDR rule must be present in route.rules
+    /// to catch QUIC UDP 443 to googlevideo.com when sniff misses SNI. Chrome
+    /// caches `alt-svc: h3=:443` after first HTTP/2 response and switches to
+    /// QUIC; sing-box sniff on QUIC initial packet is unreliable → rule by
+    /// domain_suffix does not fire → connection falls through to route.final.
+    /// Without this rule, @voksep's "second video hangs, page reload fixes"
+    /// symptom reproduces. Mirrors telegram_ip_cidr pattern and server-side
+    /// template v81 Google ASN15169 rule.
+    #[test]
+    fn youtube_ip_cidr_fallback_rule_present_for_quic_leak() {
+        let raw = "vless://00000000-0000-4000-8000-000000000009@192.0.2.90:443?type=tcp&security=reality&pbk=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB&fp=chrome&sni=google.com&sid=cafebabe&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+        let rules = cfg
+            .get("route")
+            .and_then(|r| r.get("rules"))
+            .and_then(|r| r.as_array())
+            .expect("route.rules array");
+        // Find the IP-CIDR rule that steers Google to proxy-yt.
+        let google_cidr_rule = rules.iter().find(|r| {
+            r.get("outbound").and_then(|v| v.as_str()) == Some("proxy-yt")
+                && r.get("ip_cidr")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .any(|v| v.as_str() == Some("142.250.0.0/15"))
+                    })
+                    .unwrap_or(false)
+        });
+        assert!(
+            google_cidr_rule.is_some(),
+            "route.rules must contain a Google/YouTube IP-CIDR rule → proxy-yt \
+             (at minimum 142.250.0.0/15 from ASN15169). Without it, QUIC UDP 443 \
+             to googlevideo leaks to route.final when sniff misses SNI. Got rules: {:?}",
+            rules
+        );
+        let rule = google_cidr_rule.unwrap();
+        let cidrs: Vec<&str> = rule
+            .get("ip_cidr")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        // Expect the same coverage as server-side template v81 (9 prefixes).
+        for required in &[
+            "142.250.0.0/15",
+            "172.217.0.0/16",
+            "173.194.0.0/16",
+            "216.58.192.0/19",
+            "2607:f8b0::/32",
+        ] {
+            assert!(
+                cidrs.contains(required),
+                "Google IP-CIDR rule missing {:?}, got={:?}",
+                required,
+                cidrs
+            );
+        }
+    }
+}

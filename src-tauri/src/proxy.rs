@@ -26,7 +26,8 @@ fn active_network_service() -> Result<String, Box<dyn std::error::Error>> {
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines().skip(1) {
         let service = line.trim().trim_start_matches('*');
-        if !service.is_empty() && !service.contains("Bluetooth") && !service.contains("Thunderbolt") {
+        if !service.is_empty() && !service.contains("Bluetooth") && !service.contains("Thunderbolt")
+        {
             return Ok(service.to_string());
         }
     }
@@ -39,14 +40,30 @@ pub fn enable_system_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> 
     let service = active_network_service()?;
     let port_str = port.to_string();
 
-    log::info!("Setting system proxy on '{}' -> 127.0.0.1:{}", service, port);
+    log::info!(
+        "Setting system proxy on '{}' -> 127.0.0.1:{}",
+        service,
+        port
+    );
 
-    Command::new("networksetup").args(["-setwebproxy", &service, "127.0.0.1", &port_str]).output()?;
-    Command::new("networksetup").args(["-setwebproxystate", &service, "on"]).output()?;
-    Command::new("networksetup").args(["-setsecurewebproxy", &service, "127.0.0.1", &port_str]).output()?;
-    Command::new("networksetup").args(["-setsecurewebproxystate", &service, "on"]).output()?;
-    Command::new("networksetup").args(["-setsocksfirewallproxy", &service, "127.0.0.1", &port_str]).output()?;
-    Command::new("networksetup").args(["-setsocksfirewallproxystate", &service, "on"]).output()?;
+    Command::new("networksetup")
+        .args(["-setwebproxy", &service, "127.0.0.1", &port_str])
+        .output()?;
+    Command::new("networksetup")
+        .args(["-setwebproxystate", &service, "on"])
+        .output()?;
+    Command::new("networksetup")
+        .args(["-setsecurewebproxy", &service, "127.0.0.1", &port_str])
+        .output()?;
+    Command::new("networksetup")
+        .args(["-setsecurewebproxystate", &service, "on"])
+        .output()?;
+    Command::new("networksetup")
+        .args(["-setsocksfirewallproxy", &service, "127.0.0.1", &port_str])
+        .output()?;
+    Command::new("networksetup")
+        .args(["-setsocksfirewallproxystate", &service, "on"])
+        .output()?;
 
     log::info!("System proxy enabled: {}:{}", service, port);
     Ok(())
@@ -58,9 +75,15 @@ pub fn disable_system_proxy() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Disabling system proxy on '{}'", service);
 
-    Command::new("networksetup").args(["-setwebproxystate", &service, "off"]).output()?;
-    Command::new("networksetup").args(["-setsecurewebproxystate", &service, "off"]).output()?;
-    Command::new("networksetup").args(["-setsocksfirewallproxystate", &service, "off"]).output()?;
+    Command::new("networksetup")
+        .args(["-setwebproxystate", &service, "off"])
+        .output()?;
+    Command::new("networksetup")
+        .args(["-setsecurewebproxystate", &service, "off"])
+        .output()?;
+    Command::new("networksetup")
+        .args(["-setsocksfirewallproxystate", &service, "off"])
+        .output()?;
 
     log::info!("System proxy disabled on '{}'", service);
     Ok(())
@@ -74,7 +97,8 @@ pub fn enable_system_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> 
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu.create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")?;
+    let (key, _) =
+        hkcu.create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")?;
 
     let proxy_server = format!("127.0.0.1:{}", port);
     key.set_value("ProxyEnable", &1u32)?;
@@ -95,7 +119,8 @@ pub fn disable_system_proxy() -> Result<(), Box<dyn std::error::Error>> {
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu.create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")?;
+    let (key, _) =
+        hkcu.create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")?;
 
     key.set_value("ProxyEnable", &0u32)?;
 
@@ -112,7 +137,12 @@ fn notify_proxy_change() {
     use std::ptr;
     #[link(name = "wininet")]
     extern "system" {
-        fn InternetSetOptionW(h: *mut std::ffi::c_void, opt: u32, buf: *mut std::ffi::c_void, len: u32) -> i32;
+        fn InternetSetOptionW(
+            h: *mut std::ffi::c_void,
+            opt: u32,
+            buf: *mut std::ffi::c_void,
+            len: u32,
+        ) -> i32;
     }
     unsafe {
         // INTERNET_OPTION_SETTINGS_CHANGED = 39

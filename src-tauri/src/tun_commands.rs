@@ -40,7 +40,11 @@ pub async fn tun_status() -> Result<TunStatus, String> {
     }
 
     match tun_helper::send(Request::Status).await {
-        Ok(Response::Status { running, pid, uptime_secs }) => Ok(TunStatus {
+        Ok(Response::Status {
+            running,
+            pid,
+            uptime_secs,
+        }) => Ok(TunStatus {
             helper_installed: true,
             helper_running: true,
             singbox_running: running,
@@ -71,10 +75,7 @@ pub fn tun_uninstall_helper(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Start sing-box via helper. Helper runs sing-box as root → TUN mode works.
 #[tauri::command]
-pub async fn tun_start(
-    config_path: String,
-    app: tauri::AppHandle,
-) -> Result<u32, String> {
+pub async fn tun_start(config_path: String, app: tauri::AppHandle) -> Result<u32, String> {
     let singbox_path = bundled_singbox_path(&app)?;
     match tun_helper::send(Request::Start {
         config_path,
@@ -92,7 +93,14 @@ pub async fn tun_start(
 #[tauri::command]
 pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, String> {
     // 1. Build TUN config — auto-detect VLESS link / sub URL / Proteus key
-    let s = key.trim();
+    let raw = key.trim();
+    // Normalize: full subscription URLs for our backends → bare key via CF Worker
+    let s: std::borrow::Cow<str> = if let Some(k) = crate::extract_proteus_key(raw) {
+        std::borrow::Cow::Owned(k)
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    };
+    let s: &str = &s;
     if s.starts_with("vless://") {
         let v = crate::vless::parse_vless(s).map_err(|e| format!("VLESS parse failed: {}", e))?;
         config::save_vless_config(&v, config::InboundMode::Tun)
@@ -102,7 +110,11 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
         let url = if s.starts_with("https://") || s.starts_with("http://") {
             s.to_string()
         } else {
-            format!("{}/sub/{}", config::config_base_url(), s)
+            format!(
+                "{}/proteus-sub?sub={}&format=json-text",
+                config::config_base_url(),
+                s
+            )
         };
         config::fetch_and_cache_with_mode(&url, config::InboundMode::Tun)
             .await

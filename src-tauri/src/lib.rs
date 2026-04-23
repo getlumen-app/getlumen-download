@@ -1,12 +1,12 @@
-mod config;
-mod singbox;
 mod clash_api;
+mod config;
 mod proxy;
-mod vless;
-#[cfg(target_os = "macos")]
-mod tun_helper;
+mod singbox;
 #[cfg(target_os = "macos")]
 mod tun_commands;
+#[cfg(target_os = "macos")]
+mod tun_helper;
+mod vless;
 
 use std::sync::Mutex;
 use tauri::State;
@@ -19,13 +19,74 @@ pub struct AppState {
 /// Detect what kind of input the user provided.
 fn detect_input_type(raw: &str) -> &'static str {
     let s = raw.trim();
-    if s.starts_with("vless://") { "vless" }
-    else if s.starts_with("https://") || s.starts_with("http://") { "subscription_url" }
-    else { "proteus_key" }
+    if s.starts_with("vless://") {
+        return "vless";
+    }
+    // Known internal subscription URLs — extract the ?sub= key and treat as proteus_key
+    // so they always route through the CF Worker (not the raw backend).
+    if (s.starts_with("https://") || s.starts_with("http://")) && extract_proteus_key(s).is_some() {
+        return "proteus_key";
+    }
+    if s.starts_with("https://") || s.starts_with("http://") {
+        "subscription_url"
+    } else {
+        "proteus_key"
+    }
+}
+
+/// Extract a bare subscription key from any URL variant.
+///
+/// Handles:
+///   - `https://<host>/proteus-sub?sub=KEY[&format=...]`
+///   - `https://<host>/sub/KEY`
+///
+/// Returns `None` for URLs not matching these patterns (e.g. third-party subs
+/// that do not follow either shape).
+pub(crate) fn extract_proteus_key(url: &str) -> Option<String> {
+    // ?sub=KEY query param
+    if let Some(pos) = url.find("?sub=").or_else(|| url.find("&sub=")) {
+        let rest = &url[pos + 5..];
+        let key: String = rest
+            .chars()
+            .take_while(|c| *c != '&' && *c != '#')
+            .collect();
+        if key.len() >= 8
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Some(key);
+        }
+    }
+    // /sub/KEY path
+    if let Some(idx) = url.find("/sub/") {
+        let rest = &url[idx + 5..];
+        let key: String = rest
+            .chars()
+            .take_while(|c| *c != '?' && *c != '#' && *c != '/')
+            .collect();
+        if key.len() >= 8
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Some(key);
+        }
+    }
+    None
 }
 
 /// Build config (proxy mode) from any input type — VLESS link or Proteus sub key/URL.
 async fn prepare_proxy_config(key: &str) -> Result<(), String> {
+    let raw = key.trim();
+    // Normalize: if user pasted a full subscription URL for our backends,
+    // extract the bare key so it routes through the CF Worker.
+    let key = if let Some(extracted) = extract_proteus_key(raw) {
+        std::borrow::Cow::Owned(extracted)
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    };
+    let key: &str = &key;
     match detect_input_type(key) {
         "vless" => {
             let v = vless::parse_vless(key).map_err(|e| format!("VLESS parse failed: {}", e))?;
@@ -34,11 +95,19 @@ async fn prepare_proxy_config(key: &str) -> Result<(), String> {
                 .map_err(|e| format!("Config build failed: {}", e))?;
         }
         "subscription_url" => {
-            config::fetch_and_cache(key).await.map_err(|e| format!("Config fetch failed: {}", e))?;
+            config::fetch_and_cache(key)
+                .await
+                .map_err(|e| format!("Config fetch failed: {}", e))?;
         }
         _ => {
-            let url = format!("{}/sub/{}", config::config_base_url(), key);
-            config::fetch_and_cache(&url).await.map_err(|e| format!("Config fetch failed: {}", e))?;
+            let url = format!(
+                "{}/proteus-sub?sub={}&format=json-text",
+                config::config_base_url(),
+                key
+            );
+            config::fetch_and_cache(&url)
+                .await
+                .map_err(|e| format!("Config fetch failed: {}", e))?;
         }
     }
     Ok(())
@@ -91,7 +160,10 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
     *state.config_path.lock().unwrap() = Some(path_str.clone());
 
     // 2. Start sing-box (proxy mode, no root needed)
-    state.singbox.lock().unwrap()
+    state
+        .singbox
+        .lock()
+        .unwrap()
         .start(&path_str)
         .map_err(|e| format!("sing-box failed: {}", e))?;
 
@@ -126,13 +198,16 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
     {
         std::process::Command::new("launchctl")
             .args(["setenv", "https_proxy", "http://127.0.0.1:10808"])
-            .output().ok();
+            .output()
+            .ok();
         std::process::Command::new("launchctl")
             .args(["setenv", "http_proxy", "http://127.0.0.1:10808"])
-            .output().ok();
+            .output()
+            .ok();
         std::process::Command::new("launchctl")
             .args(["setenv", "all_proxy", "socks5://127.0.0.1:10808"])
-            .output().ok();
+            .output()
+            .ok();
     }
 
     Ok(())
@@ -148,17 +223,23 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     {
         std::process::Command::new("launchctl")
             .args(["setenv", "https_proxy", ""])
-            .output().ok();
+            .output()
+            .ok();
         std::process::Command::new("launchctl")
             .args(["setenv", "http_proxy", ""])
-            .output().ok();
+            .output()
+            .ok();
         std::process::Command::new("launchctl")
             .args(["setenv", "all_proxy", ""])
-            .output().ok();
+            .output()
+            .ok();
     }
 
     // 3. Stop sing-box
-    state.singbox.lock().unwrap()
+    state
+        .singbox
+        .lock()
+        .unwrap()
         .stop()
         .map_err(|e| e.to_string())?;
 
@@ -178,7 +259,9 @@ async fn get_proxies() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 async fn select_proxy(group: String, name: String) -> Result<(), String> {
-    clash_api::select_proxy(&group, &name).await.map_err(|e| e.to_string())
+    clash_api::select_proxy(&group, &name)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -199,21 +282,29 @@ async fn get_logs() -> Result<Vec<String>, String> {
     for p in &paths {
         if p.exists() {
             if let Ok(content) = std::fs::read_to_string(p) {
-                let lines: Vec<String> = content.lines()
-                    .rev().take(200).collect::<Vec<_>>()
-                    .into_iter().rev()
+                let lines: Vec<String> = content
+                    .lines()
+                    .rev()
+                    .take(200)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
                     .map(|s| s.to_string())
                     .collect();
                 return Ok(lines);
             }
         }
     }
-    Ok(vec!["No log file found. Connect to start logging.".to_string()])
+    Ok(vec![
+        "No log file found. Connect to start logging.".to_string()
+    ])
 }
 
 #[tauri::command]
 async fn test_delay(name: String) -> Result<u32, String> {
-    clash_api::test_delay(&name).await.map_err(|e| e.to_string())
+    clash_api::test_delay(&name)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

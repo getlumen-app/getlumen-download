@@ -18,7 +18,10 @@ const HELPER_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/io.getlumen.he
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Ping,
-    Start { config_path: String, singbox_path: String },
+    Start {
+        config_path: String,
+        singbox_path: String,
+    },
     Stop,
     Status,
     Uninstall,
@@ -27,12 +30,22 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
-    Pong { version: String },
-    Started { pid: u32 },
+    Pong {
+        version: String,
+    },
+    Started {
+        pid: u32,
+    },
     Stopped,
-    Status { running: bool, pid: Option<u32>, uptime_secs: Option<u64> },
+    Status {
+        running: bool,
+        pid: Option<u32>,
+        uptime_secs: Option<u64>,
+    },
     Uninstalling,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Check if helper is installed (binary + plist exist).
@@ -97,7 +110,10 @@ pub fn uninstall_helper(installer_path: &str) -> Result<(), String> {
     }
     let script = format!(
         r#"do shell script "'{}' uninstall" with administrator privileges with prompt "Lumen wants to remove its VPN helper.""#,
-        installer_path.replace('\'', "'\\''").replace('\\', "\\\\").replace('"', "\\\"")
+        installer_path
+            .replace('\'', "'\\''")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
     );
     let output = Command::new("/usr/bin/osascript")
         .args(["-e", &script])
@@ -114,13 +130,10 @@ pub fn uninstall_helper(installer_path: &str) -> Result<(), String> {
 
 /// Send one request, await one response (with 10s timeout).
 pub async fn send(req: Request) -> Result<Response, String> {
-    let connect = timeout(
-        Duration::from_secs(3),
-        UnixStream::connect(SOCKET_PATH),
-    )
-    .await
-    .map_err(|_| "Connect timeout".to_string())?
-    .map_err(|e| format!("Connect failed: {}", e))?;
+    let connect = timeout(Duration::from_secs(3), UnixStream::connect(SOCKET_PATH))
+        .await
+        .map_err(|_| "Connect timeout".to_string())?
+        .map_err(|e| format!("Connect failed: {}", e))?;
 
     let (read_half, mut write_half) = connect.into_split();
     let mut reader = BufReader::new(read_half);
@@ -131,7 +144,10 @@ pub async fn send(req: Request) -> Result<Response, String> {
         .write_all(json.as_bytes())
         .await
         .map_err(|e| format!("write: {}", e))?;
-    write_half.flush().await.map_err(|e| format!("flush: {}", e))?;
+    write_half
+        .flush()
+        .await
+        .map_err(|e| format!("flush: {}", e))?;
 
     let mut line = String::new();
     timeout(Duration::from_secs(10), reader.read_line(&mut line))

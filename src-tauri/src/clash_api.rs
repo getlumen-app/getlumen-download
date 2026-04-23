@@ -75,15 +75,21 @@ fn find_outbound_endpoint(tag: &str) -> Result<String, Box<dyn std::error::Error
         super::config::tun_config_file_path(),
     ];
     for path in &candidates {
-        if !path.exists() { continue; }
+        if !path.exists() {
+            continue;
+        }
         let body = std::fs::read_to_string(path)?;
         let cfg: Value = serde_json::from_str(&body)?;
         if let Some(arr) = cfg.get("outbounds").and_then(|o| o.as_array()) {
             for o in arr {
                 if o.get("tag").and_then(|t| t.as_str()) == Some(tag) {
-                    let server = o.get("server").and_then(|s| s.as_str())
+                    let server = o
+                        .get("server")
+                        .and_then(|s| s.as_str())
                         .ok_or("outbound has no server field (group?)")?;
-                    let port = o.get("server_port").and_then(|p| p.as_u64())
+                    let port = o
+                        .get("server_port")
+                        .and_then(|p| p.as_u64())
                         .ok_or("outbound has no server_port")?;
                     return Ok(format!("{}:{}", server, port));
                 }
@@ -108,10 +114,8 @@ async fn tcp_ping(addr: &str) -> Result<u32, Box<dyn std::error::Error>> {
     let addr_str = addr.to_string();
 
     let start = Instant::now();
-    let result = tokio::task::spawn_blocking(move || {
-        connect_bypass_tun(socket_addr, timeout)
-    })
-    .await?;
+    let result =
+        tokio::task::spawn_blocking(move || connect_bypass_tun(socket_addr, timeout)).await?;
 
     match result {
         Ok(_stream) => Ok(start.elapsed().as_millis() as u32),
@@ -122,7 +126,10 @@ async fn tcp_ping(addr: &str) -> Result<u32, Box<dyn std::error::Error>> {
 /// macOS: bind socket to en0/en1/etc to bypass TUN, then TCP connect.
 /// Other platforms: plain connect.
 #[cfg(target_os = "macos")]
-fn connect_bypass_tun(addr: std::net::SocketAddr, timeout: std::time::Duration) -> std::io::Result<std::net::TcpStream> {
+fn connect_bypass_tun(
+    addr: std::net::SocketAddr,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::net::TcpStream> {
     use std::os::unix::io::AsRawFd;
 
     // Find first existing physical interface (en0, en1, ...). 0 = none.
@@ -163,7 +170,8 @@ fn connect_bypass_tun(addr: std::net::SocketAddr, timeout: std::time::Duration) 
     set_socket_timeout(fd, timeout)?;
 
     let (sockaddr, sockaddr_len) = sockaddr_from(addr);
-    let connect_result = unsafe { libc::connect(fd, sockaddr.as_ptr() as *const libc::sockaddr, sockaddr_len) };
+    let connect_result =
+        unsafe { libc::connect(fd, sockaddr.as_ptr() as *const libc::sockaddr, sockaddr_len) };
     if connect_result < 0 {
         let err = std::io::Error::last_os_error();
         unsafe { libc::close(fd) };
@@ -177,7 +185,10 @@ fn connect_bypass_tun(addr: std::net::SocketAddr, timeout: std::time::Duration) 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn connect_bypass_tun(addr: std::net::SocketAddr, timeout: std::time::Duration) -> std::io::Result<std::net::TcpStream> {
+fn connect_bypass_tun(
+    addr: std::net::SocketAddr,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::net::TcpStream> {
     std::net::TcpStream::connect_timeout(&addr, timeout)
 }
 
@@ -230,7 +241,10 @@ fn sockaddr_from(addr: std::net::SocketAddr) -> (Vec<u8>, libc::socklen_t) {
                 )
             }
             .to_vec();
-            (bytes, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+            (
+                bytes,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
         }
         std::net::SocketAddr::V6(v6) => {
             let raw = libc::sockaddr_in6 {
@@ -238,7 +252,9 @@ fn sockaddr_from(addr: std::net::SocketAddr) -> (Vec<u8>, libc::socklen_t) {
                 sin6_family: libc::AF_INET6 as u8,
                 sin6_port: v6.port().to_be(),
                 sin6_flowinfo: v6.flowinfo(),
-                sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
+                sin6_addr: libc::in6_addr {
+                    s6_addr: v6.ip().octets(),
+                },
                 sin6_scope_id: v6.scope_id(),
             };
             let bytes = unsafe {
@@ -248,8 +264,10 @@ fn sockaddr_from(addr: std::net::SocketAddr) -> (Vec<u8>, libc::socklen_t) {
                 )
             }
             .to_vec();
-            (bytes, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t)
+            (
+                bytes,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            )
         }
     }
 }
-
