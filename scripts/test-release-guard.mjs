@@ -21,13 +21,24 @@ const goodFetch = async (url, init = {}) => {
     return response({
       tag_name: "v2.4.0",
       assets: [
-        { name: "install.sh" },
-        { name: "Lumen_2.4.0_aarch64.dmg" },
-        { name: "Lumen_2.4.0_x64-setup.exe" },
+        {
+          name: "install.sh",
+          browser_download_url: "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/install.sh",
+        },
+        {
+          name: "Lumen_2.4.0_aarch64.dmg",
+          browser_download_url:
+            "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/Lumen_2.4.0_aarch64.dmg",
+        },
+        {
+          name: "Lumen_2.4.0_x64-setup.exe",
+          browser_download_url:
+            "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/Lumen_2.4.0_x64-setup.exe",
+        },
       ],
     });
   }
-  if (u === "https://github.com/getlumen-app/getlumen-download/releases/latest/download/install.sh") {
+  if (u === "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/install.sh") {
     return response('REPO="getlumen-app/getlumen-download"\n--dry-run\nDry run complete. No files were installed.');
   }
   if (u === "https://getlumen.download/install") {
@@ -51,6 +62,10 @@ const good = await checkReleasePath({ expectedVersion: "2.4.0", fetchImpl: goodF
 assert.equal(good.ok, true);
 assert.equal(good.summary.passed, good.summary.total);
 assert.equal(good.release.tag, "v2.4.0");
+assert.equal(
+  good.release.install_url,
+  "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/install.sh",
+);
 
 const missingAsset = await checkReleasePath({
   expectedVersion: "2.4.0",
