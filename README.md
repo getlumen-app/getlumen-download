@@ -86,6 +86,20 @@ npm run tauri build
 # Output: src-tauri/target/release/bundle/dmg/Lumen_*.dmg
 ```
 
+### Windows release build
+
+The GitHub Actions `build-windows` job builds the NSIS installer on
+`windows-latest`. It downloads `sing-box.exe`, builds
+`wbstream_multipath_client.exe`, copies both into `bin/`, then runs:
+
+```bash
+npm run tauri -- build -- --bundles nsis
+```
+
+WB Stream hard-whitelist fallback on Windows still needs a Windows build of
+`headless-wbstream-joiner.exe`; until that sidecar exists, Windows builds are
+for normal proxy-mode validation and release plumbing.
+
 ### Release guard
 
 Before announcing a release, verify the public install path:

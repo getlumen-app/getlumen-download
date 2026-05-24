@@ -20,7 +20,11 @@ const goodFetch = async (url, init = {}) => {
   if (u === "https://api.github.com/repos/getlumen-app/getlumen-download/releases/latest") {
     return response({
       tag_name: "v2.4.0",
-      assets: [{ name: "install.sh" }, { name: "Lumen_2.4.0_aarch64.dmg" }],
+      assets: [
+        { name: "install.sh" },
+        { name: "Lumen_2.4.0_aarch64.dmg" },
+        { name: "Lumen_2.4.0_x64-setup.exe" },
+      ],
     });
   }
   if (u === "https://github.com/getlumen-app/getlumen-download/releases/latest/download/install.sh") {
@@ -30,6 +34,10 @@ const goodFetch = async (url, init = {}) => {
     return response('REPO="getlumen-app/getlumen-download"\n--dry-run\nDry run complete. No files were installed.');
   }
   if (u === "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/Lumen_2.4.0_aarch64.dmg") {
+    assert.equal(init.method, "HEAD");
+    return response("", { status: 200 });
+  }
+  if (u === "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/Lumen_2.4.0_x64-setup.exe") {
     assert.equal(init.method, "HEAD");
     return response("", { status: 200 });
   }
@@ -59,7 +67,27 @@ assert.equal(missingAsset.ok, false);
 assert.equal(
   missingAsset.checks.find((check) => check.id === "latest_release").status,
   "fail",
-  "latest release check must fail when the matching DMG asset is missing",
+  "latest release check must fail when the matching desktop assets are missing",
+);
+
+const missingWindowsAsset = await checkReleasePath({
+  expectedVersion: "2.4.0",
+  fetchImpl: async (url) => {
+    const u = String(url);
+    if (u.includes("api.github.com")) {
+      return response({
+        tag_name: "v2.4.0",
+        assets: [{ name: "install.sh" }, { name: "Lumen_2.4.0_aarch64.dmg" }],
+      });
+    }
+    return goodFetch(url);
+  },
+});
+
+assert.equal(missingWindowsAsset.ok, false);
+assert.equal(
+  missingWindowsAsset.checks.find((check) => check.id === "latest_release").message,
+  "Lumen_2.4.0_x64-setup.exe asset is missing",
 );
 
 const versionMismatch = await checkReleasePath({

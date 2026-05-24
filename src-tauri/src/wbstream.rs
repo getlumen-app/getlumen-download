@@ -311,10 +311,24 @@ fn find_joiner(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 fn find_multipath_client(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     find_bundled_or_lab_binary(
         app,
-        "wbstream_multipath_client",
+        platform_binary_name("wbstream_multipath_client"),
         "/opt/getlumen/wbstream/wbstream_multipath_client",
     )
         .ok_or_else(|| "wbstream_multipath_client is not bundled".to_string())
+}
+
+fn platform_binary_name(base: &'static str) -> &'static str {
+    #[cfg(windows)]
+    {
+        match base {
+            "wbstream_multipath_client" => "wbstream_multipath_client.exe",
+            other => other,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        base
+    }
 }
 
 fn find_bundled_or_lab_binary(
