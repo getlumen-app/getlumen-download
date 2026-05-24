@@ -1,172 +1,119 @@
-#!/bin/bash
-# Lumen VPN — macOS installer (TUN mode by default)
-# Usage: curl -sL https://getlumen.download/install | bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 APP_NAME="Lumen"
 REPO="getlumen-app/getlumen-download"
 INSTALL_DIR="/Applications"
-HELPER_LABEL="io.getlumen.helper"
+DRY_RUN=0
 
-echo "=========================================="
-echo "  Lumen VPN — One-command installer"
-echo "=========================================="
-echo ""
-
-# Detect architecture
-ARCH=$(uname -m)
-case "$ARCH" in
-  arm64)  ARCH_SUFFIX="aarch64" ;;
-  x86_64) ARCH_SUFFIX="x86_64" ;;
-  *)
-    echo "✗ Unsupported architecture: $ARCH"
-    exit 1
-    ;;
-esac
-
-# Find DMG URL from release assets (handles version mismatch with tag)
-echo "[1/6] Fetching latest release..."
-RELEASE_JSON=$(curl -sL "https://api.github.com/repos/${REPO}/releases/latest")
-DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep -E "_${ARCH_SUFFIX}\.dmg" | head -1 | sed 's/.*"browser_download_url": *"\(.*\)"/\1/')
-
-if [ -z "$DOWNLOAD_URL" ]; then
-  echo "✗ Could not find DMG for ${ARCH_SUFFIX} in latest release"
-  exit 1
-fi
-
-DMG_NAME=$(basename "$DOWNLOAD_URL")
-echo "[2/6] Downloading ${DMG_NAME}..."
-TMPDIR_PATH=$(mktemp -d)
-DMG_PATH="${TMPDIR_PATH}/${DMG_NAME}"
-curl -fsSL -o "$DMG_PATH" "$DOWNLOAD_URL"
-
-if [ ! -f "$DMG_PATH" ] || [ ! -s "$DMG_PATH" ]; then
-  echo "✗ Download failed (URL: $DOWNLOAD_URL)"
-  rm -rf "$TMPDIR_PATH"
-  exit 1
-fi
-
-# Verify it's actually a DMG (not HTML 404 page)
-FILE_TYPE=$(file -b "$DMG_PATH")
-if ! echo "$FILE_TYPE" | grep -qiE "zlib|disk image|Apple"; then
-  echo "✗ Downloaded file is not a DMG: $FILE_TYPE"
-  echo "  URL: $DOWNLOAD_URL"
-  echo "  First 200 chars: $(head -c 200 "$DMG_PATH")"
-  rm -rf "$TMPDIR_PATH"
-  exit 1
-fi
-
-# Only after the DMG is staged locally do we touch existing proxy/VPN state.
-# This avoids the self-lockout case where network breaks after cleanup but
-# before the new app has been downloaded.
-echo "[3/6] Cleaning up old VPN proxy settings..."
-
-# 1. System proxy (suppress stdout errors for missing interfaces)
-for iface in Wi-Fi Ethernet "Thunderbolt Bridge"; do
-  networksetup -setsocksfirewallproxystate "$iface" off >/dev/null 2>&1 || true
-  networksetup -setwebproxystate "$iface" off >/dev/null 2>&1 || true
-  networksetup -setsecurewebproxystate "$iface" off >/dev/null 2>&1 || true
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      echo "Usage: install.sh [--dry-run]" >&2
+      exit 2
+      ;;
+  esac
 done
 
-# 2. launchctl GUI environment proxy vars
-for var in http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy; do
-  launchctl unsetenv "$var" 2>/dev/null || true
-done
-
-# 3. Shell proxy exports in .zshrc / .bash_profile
-for rc in "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"; do
-  if [ -f "$rc" ] && grep -qi 'proxy' "$rc" 2>/dev/null; then
-    cp "$rc" "${rc}.bak.pre-lumen"
-    sed -i.tmp '/[Pp]roxy/d; /set_proxy/d' "$rc"
-    rm -f "${rc}.tmp"
-    echo "  Cleaned proxy lines from $(basename "$rc")"
-  fi
-done
-
-# 4. Remove set_proxy.sh and LaunchAgent (Hiddify/V2Box auto-restorer)
-[ -f "$HOME/set_proxy.sh" ] && rm -f "$HOME/set_proxy.sh" && echo "  Removed set_proxy.sh"
-if [ -f "$HOME/Library/LaunchAgents/com.proxy.socks.plist" ]; then
-  launchctl unload "$HOME/Library/LaunchAgents/com.proxy.socks.plist" 2>/dev/null || true
-  rm -f "$HOME/Library/LaunchAgents/com.proxy.socks.plist"
-  echo "  Removed com.proxy.socks LaunchAgent"
-fi
-
-# 5. Flush DNS cache (poisoned entries from ISP)
-dscacheutil -flushcache 2>/dev/null || true
-killall -HUP mDNSResponder 2>/dev/null || true
-
-# 6. Remove old Lumen data (clean state)
-killall Lumen 2>/dev/null || true
-killall sing-box 2>/dev/null || true
-rm -rf "$HOME/Library/Caches/io.getlumen.app"
-rm -rf "$HOME/Library/Application Support/io.getlumen.app"
-rm -rf "$HOME/Library/Saved Application State/io.getlumen.app.savedState"
-rm -rf "$HOME/Library/WebKit/io.getlumen.app"
-rm -f "$HOME/Library/Preferences/io.getlumen.app.plist"
-rm -rf "$HOME/Library/HTTPStorages/io.getlumen.app"
-
-echo "  ✓ Proxy cleanup done"
-echo ""
-
-# Mount DMG
-echo "[4/6] Mounting DMG..."
-MOUNT_OUTPUT=$(hdiutil attach "$DMG_PATH" -nobrowse -noautoopen 2>&1)
-MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep "/Volumes" | awk '{print $NF}')
-
-if [ -z "$MOUNT_POINT" ]; then
-  MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | tail -1 | awk -F'\t' '{print $NF}')
-fi
-
-if [ -z "$MOUNT_POINT" ] || [ ! -d "$MOUNT_POINT" ]; then
-  echo "✗ Failed to mount DMG"
-  rm -rf "$TMPDIR_PATH"
-  exit 1
-fi
-
-# Copy app
-echo "[5/6] Installing to ${INSTALL_DIR}..."
-if [ -d "${INSTALL_DIR}/${APP_NAME}.app" ]; then
-  rm -rf "${INSTALL_DIR}/${APP_NAME}.app"
-fi
-cp -R "${MOUNT_POINT}/${APP_NAME}.app" "${INSTALL_DIR}/"
-hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-
-# We need sudo for: xattr quarantine remove + helper install
-echo "[6/6] Setting up VPN helper for TUN mode (faster, kernel-level routing)"
-echo "      You'll be asked for your Mac password (one-time setup)"
-echo ""
-
-HELPER_BIN="${INSTALL_DIR}/${APP_NAME}.app/Contents/Resources/_up_/bin/lumen-helper"
-INSTALLER_BIN="${INSTALL_DIR}/${APP_NAME}.app/Contents/Resources/_up_/bin/lumen-installer"
-
-# Single sudo block — does both quarantine + helper install
-sudo bash -c "
-  set -e
-  # Remove quarantine flag (allows app to run unsigned)
-  xattr -rd com.apple.quarantine '${INSTALL_DIR}/${APP_NAME}.app' 2>/dev/null || true
-  # Install + start the privileged helper daemon
-  if [ -x '${INSTALLER_BIN}' ] && [ -f '${HELPER_BIN}' ]; then
-    '${INSTALLER_BIN}' install '${HELPER_BIN}'
-    echo '  ✓ TUN helper installed and started'
-  else
-    echo '  ⚠ Helper binaries not found, falling back to system proxy mode'
-  fi
-" || {
-  echo "  ⚠ Sudo setup failed — falling back to xattr only (proxy mode)"
-  xattr -cr "${INSTALL_DIR}/${APP_NAME}.app" 2>/dev/null || true
+log() {
+  printf '%s\n' "$*"
 }
 
-# Cleanup
-rm -rf "$TMPDIR_PATH"
+fail() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
 
-echo ""
-echo "=========================================="
-echo "  ${APP_NAME} installed successfully"
-echo "=========================================="
-echo ""
-echo "  • Open Lumen and paste your subscription key"
-echo "  • TUN mode auto-enabled if helper installed"
-echo ""
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
 
-# Auto-launch
-open "${INSTALL_DIR}/${APP_NAME}.app"
+require_cmd curl
+require_cmd file
+require_cmd hdiutil
+
+case "$(uname -s)" in
+  Darwin) ;;
+  *) fail "Lumen installer currently supports macOS only" ;;
+esac
+
+case "$(uname -m)" in
+  arm64) ARCH_SUFFIX="aarch64" ;;
+  x86_64) ARCH_SUFFIX="x86_64" ;;
+  *) fail "unsupported architecture: $(uname -m)" ;;
+esac
+
+TMPDIR_PATH="$(mktemp -d)"
+MOUNT_POINT=""
+
+cleanup() {
+  if [ -n "$MOUNT_POINT" ]; then
+    hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TMPDIR_PATH"
+}
+trap cleanup EXIT
+
+log "Lumen installer"
+log "Repository: $REPO"
+log "Architecture: $ARCH_SUFFIX"
+
+release_json="$TMPDIR_PATH/latest.json"
+curl -fsSL --connect-timeout 10 --max-time 30 \
+  "https://api.github.com/repos/${REPO}/releases/latest" \
+  -o "$release_json"
+
+download_url="$(
+  grep '"browser_download_url"' "$release_json" \
+    | grep -E "_${ARCH_SUFFIX}\\.dmg\"" \
+    | head -1 \
+    | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/'
+)"
+
+[ -n "$download_url" ] || fail "could not find ${ARCH_SUFFIX} DMG in latest release"
+
+dmg_name="$(basename "$download_url")"
+dmg_path="$TMPDIR_PATH/$dmg_name"
+
+log "Downloading: $dmg_name"
+curl -fL --connect-timeout 10 --max-time 300 --retry 2 \
+  -o "$dmg_path" \
+  "$download_url"
+
+[ -s "$dmg_path" ] || fail "downloaded DMG is empty"
+
+file_type="$(file -b "$dmg_path")"
+if ! printf '%s' "$file_type" | grep -qiE 'zlib|disk image|Apple'; then
+  fail "downloaded file is not a DMG: $file_type"
+fi
+
+log "Verified DMG: $file_type"
+
+if [ "$DRY_RUN" = "1" ]; then
+  log "Dry run complete. No files were installed."
+  exit 0
+fi
+
+log "Mounting DMG"
+mount_output="$(hdiutil attach "$dmg_path" -nobrowse -noautoopen 2>&1)"
+MOUNT_POINT="$(printf '%s\n' "$mount_output" | awk '/\\/Volumes\\// {print $NF; exit}')"
+
+[ -n "$MOUNT_POINT" ] && [ -d "$MOUNT_POINT" ] || fail "failed to mount DMG"
+[ -d "$MOUNT_POINT/$APP_NAME.app" ] || fail "DMG does not contain $APP_NAME.app"
+
+log "Installing to $INSTALL_DIR/$APP_NAME.app"
+osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+
+if [ -d "$INSTALL_DIR/$APP_NAME.app" ]; then
+  rm -rf "$INSTALL_DIR/$APP_NAME.app"
+fi
+
+ditto "$MOUNT_POINT/$APP_NAME.app" "$INSTALL_DIR/$APP_NAME.app"
+xattr -cr "$INSTALL_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
+
+installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INSTALL_DIR/$APP_NAME.app/Contents/Info.plist" 2>/dev/null || true)"
+
+log "Installed $APP_NAME ${installed_version:-unknown}"
+log "Open $INSTALL_DIR/$APP_NAME.app"
