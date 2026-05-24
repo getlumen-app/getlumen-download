@@ -213,8 +213,7 @@ impl SingboxManager {
     fn find_binary_near_exe(exe: &Path, bin_name: &str) -> Option<PathBuf> {
         #[cfg(windows)]
         {
-            if let Some(dir) = exe.parent() {
-                let candidate = dir.join(bin_name);
+            for candidate in Self::windows_resource_candidates(&exe, bin_name) {
                 if candidate.exists() {
                     return Some(candidate);
                 }
@@ -233,7 +232,6 @@ impl SingboxManager {
         None
     }
 
-    #[cfg(target_os = "macos")]
     fn macos_resource_candidates(exe: &Path, bin_name: &str) -> [PathBuf; 2] {
         let resources_dir = exe
             .parent()
@@ -246,6 +244,15 @@ impl SingboxManager {
             resources_dir.join(bin_name),
         ]
     }
+
+    fn windows_resource_candidates(exe: &Path, bin_name: &str) -> [PathBuf; 2] {
+        let app_dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+
+        [
+            app_dir.join("_up_").join("bin").join(bin_name),
+            app_dir.join(bin_name),
+        ]
+    }
 }
 
 impl Drop for SingboxManager {
@@ -254,7 +261,7 @@ impl Drop for SingboxManager {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::SingboxManager;
     use std::path::{Path, PathBuf};
@@ -271,6 +278,21 @@ mod tests {
         assert_eq!(
             candidates[1],
             PathBuf::from("/Applications/Lumen.app/Contents/Resources/sing-box")
+        );
+    }
+
+    #[test]
+    fn windows_prefers_tauri_up_bin_before_app_root() {
+        let exe = Path::new("/Users/kiril/AppData/Local/Lumen/lumen.exe");
+        let candidates = SingboxManager::windows_resource_candidates(exe, "sing-box.exe");
+
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/Users/kiril/AppData/Local/Lumen/_up_/bin/sing-box.exe")
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from("/Users/kiril/AppData/Local/Lumen/sing-box.exe")
         );
     }
 }
