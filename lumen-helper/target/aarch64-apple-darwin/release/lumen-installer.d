@@ -1,1 +1,0 @@
-/Users/user/Documents/GitHub/greg-personal-claude/experiments/lumen/lumen-helper/target/aarch64-apple-darwin/release/lumen-installer: /Users/user/Documents/GitHub/greg-personal-claude/experiments/lumen/lumen-helper/src/bin/installer.rs
