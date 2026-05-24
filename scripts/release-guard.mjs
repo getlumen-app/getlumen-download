@@ -42,6 +42,10 @@ function expectedDmgName(version) {
   return `Lumen_${version}_aarch64.dmg`;
 }
 
+function expectedWindowsInstallerName(version) {
+  return `Lumen_${version}_x64-setup.exe`;
+}
+
 async function fetchText(fetchImpl, url, timeoutMs) {
   const response = await fetchImpl(url, {
     headers: { "User-Agent": "lumen-release-guard" },
@@ -83,8 +87,10 @@ async function checkLatestRelease({ expectedVersion, fetchImpl, timeoutMs }) {
     const version = parseTagVersion(tag);
     const assets = Array.isArray(body?.assets) ? body.assets.map((asset) => asset?.name).filter(Boolean) : [];
     const dmgName = expectedDmgName(expectedVersion);
+    const windowsInstallerName = expectedWindowsInstallerName(expectedVersion);
     const dmgUrl = `https://github.com/${REPO}/releases/download/v${expectedVersion}/${dmgName}`;
-    const release = { tag, version, assets, dmg_url: dmgUrl };
+    const windowsInstallerUrl = `https://github.com/${REPO}/releases/download/v${expectedVersion}/${windowsInstallerName}`;
+    const release = { tag, version, assets, dmg_url: dmgUrl, windows_installer_url: windowsInstallerUrl };
 
     if (version !== expectedVersion) {
       return {
@@ -109,17 +115,28 @@ async function checkLatestRelease({ expectedVersion, fetchImpl, timeoutMs }) {
         release,
       };
     }
+    if (!assets.includes(windowsInstallerName)) {
+      return {
+        check: fail("latest_release", "GitHub latest release", `${windowsInstallerName} asset is missing`, {
+          http: response.status,
+        }),
+        release,
+      };
+    }
 
     return {
-      check: pass("latest_release", "GitHub latest release", `v${expectedVersion} has install.sh and ${dmgName}`, {
-        http: response.status,
-      }),
+      check: pass(
+        "latest_release",
+        "GitHub latest release",
+        `v${expectedVersion} has install.sh, ${dmgName}, and ${windowsInstallerName}`,
+        { http: response.status },
+      ),
       release,
     };
   } catch (error) {
     return {
       check: fail("latest_release", "GitHub latest release", error.message, { http: null }),
-      release: { tag: null, version: null, assets: [], dmg_url: null },
+      release: { tag: null, version: null, assets: [], dmg_url: null, windows_installer_url: null },
     };
   }
 }
@@ -150,6 +167,37 @@ async function checkDmgHead({ dmgUrl, fetchImpl, timeoutMs }) {
   }
 }
 
+async function checkWindowsInstallerHead({ installerUrl, fetchImpl, timeoutMs }) {
+  if (!installerUrl) {
+    return fail("release_windows_installer", "GitHub release Windows installer", "Windows installer URL unavailable", {
+      http: null,
+      url: null,
+    });
+  }
+  try {
+    const response = await fetchImpl(installerUrl, {
+      method: "HEAD",
+      headers: { "User-Agent": "lumen-release-guard" },
+      signal: timeoutSignal(timeoutMs),
+    });
+    if (!response.ok) {
+      return fail("release_windows_installer", "GitHub release Windows installer", `HTTP ${response.status}`, {
+        http: response.status,
+        url: installerUrl,
+      });
+    }
+    return pass("release_windows_installer", "GitHub release Windows installer", "Windows installer asset is reachable", {
+      http: response.status,
+      url: installerUrl,
+    });
+  } catch (error) {
+    return fail("release_windows_installer", "GitHub release Windows installer", error.message, {
+      http: null,
+      url: installerUrl,
+    });
+  }
+}
+
 async function checkConfigGateway({ fetchImpl, timeoutMs }) {
   try {
     const { response, body } = await fetchJson(fetchImpl, URLS.configHealth, timeoutMs);
@@ -174,6 +222,7 @@ export async function checkReleasePath({
   checks.push(await checkInstaller({ id: "release_install", label: "GitHub release installer", url: URLS.releaseInstall, fetchImpl, timeoutMs }));
   checks.push(await checkInstaller({ id: "landing_install", label: "Landing installer mirror", url: URLS.landingInstall, fetchImpl, timeoutMs }));
   checks.push(await checkDmgHead({ dmgUrl: release.dmg_url, fetchImpl, timeoutMs }));
+  checks.push(await checkWindowsInstallerHead({ installerUrl: release.windows_installer_url, fetchImpl, timeoutMs }));
   checks.push(await checkConfigGateway({ fetchImpl, timeoutMs }));
 
   const summary = summarize(checks);

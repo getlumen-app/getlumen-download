@@ -29,13 +29,7 @@
   "bundle": {
     "active": true,
     "targets": ["dmg", "app", "nsis"],
-    "resources": [
-      "../bin/sing-box",
-      "../bin/headless-wbstream-joiner",
-      "../bin/wbstream_multipath_client",
-      "../bin/lumen-helper",
-      "../bin/lumen-installer"
-    ],
+    "resources": ["../bin"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
