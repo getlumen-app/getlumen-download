@@ -86,6 +86,18 @@ npm run tauri build
 # Output: src-tauri/target/release/bundle/dmg/Lumen_*.dmg
 ```
 
+### Release guard
+
+Before announcing a release, verify the public install path:
+
+```bash
+npm run release:guard
+```
+
+The guard checks the latest GitHub release tag, `install.sh`, the matching
+macOS DMG asset, the landing installer mirror, and the config gateway health.
+It exits non-zero if any public install path is stale or missing.
+
 ### macOS install hygiene
 
 After local install/release testing, keep Finder/Spotlight unambiguous:

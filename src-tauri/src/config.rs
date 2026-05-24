@@ -327,10 +327,6 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
         // Observed WB Stream API / LiveKit endpoints.
         "185.62.202.8/32",
         "194.1.214.97/32",
-        // Manifest mirror. The manifest should be cached before
-        // hard-whitelist mode, but keeping this direct avoids a control-plane
-        // loop when the mirror is still reachable.
-        "185.217.199.96/32"
     ]);
 
     serde_json::json!({
@@ -414,7 +410,6 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
 }
 
 const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] = &[
-    "http://185.217.199.96/wbstream-manifest.json",
     "https://config.getlumen.download/wbstream-manifest.json",
 ];
 
