@@ -8,6 +8,7 @@ mod tun_commands;
 #[cfg(target_os = "macos")]
 mod tun_helper;
 mod vless;
+pub mod wbstream_accounts;
 #[cfg(target_os = "macos")]
 mod wbstream;
 #[cfg(target_os = "macos")]

@@ -98,6 +98,22 @@ This archives old `/Applications/Lumen.app.backup-*` bundles, removes the
 generated Tauri `src-tauri/target/.../Lumen.app` bundle, refreshes
 LaunchServices, and verifies that macOS exposes only `/Applications/Lumen.app`.
 
+### WB Stream account pool groundwork
+
+The client includes a deterministic WB Stream account-pool model in
+`src-tauri/src/wbstream_accounts.rs`. It is intentionally secret-free: tests use
+a fake provider that simulates healthy accounts, refreshable sessions, forced
+reauth, rate limits, disabled accounts, cooldowns, and room allocation.
+
+Before adding real volunteered accounts, keep the real provider behind the same
+contract:
+
+- store cookies/session material only in a server-side encrypted vault;
+- never commit or log raw cookies, phone numbers, WB ids, or owner names;
+- refresh only normal valid-session cookies/tokens automatically;
+- mark accounts as `needs_reauth` when WB requires SMS/OTP/CAPTCHA/manual login;
+- rotate rooms across healthy accounts and exclude rate-limited/revoked accounts.
+
 ### Environment variables
 
 | Variable | Default | Description |
