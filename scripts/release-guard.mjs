@@ -8,7 +8,6 @@ const DEFAULT_TIMEOUT_MS = 10000;
 
 const URLS = {
   latestApi: `https://api.github.com/repos/${REPO}/releases/latest`,
-  releaseInstall: `https://github.com/${REPO}/releases/latest/download/install.sh`,
   landingInstall: "https://getlumen.download/install",
   configHealth: "https://config.getlumen.download/health",
 };
@@ -85,12 +84,21 @@ async function checkLatestRelease({ expectedVersion, fetchImpl, timeoutMs }) {
 
     const tag = body?.tag_name || null;
     const version = parseTagVersion(tag);
-    const assets = Array.isArray(body?.assets) ? body.assets.map((asset) => asset?.name).filter(Boolean) : [];
+    const releaseAssets = Array.isArray(body?.assets) ? body.assets : [];
+    const assets = releaseAssets.map((asset) => asset?.name).filter(Boolean);
+    const assetUrl = (name) => releaseAssets.find((asset) => asset?.name === name)?.browser_download_url || null;
     const dmgName = expectedDmgName(expectedVersion);
     const windowsInstallerName = expectedWindowsInstallerName(expectedVersion);
     const dmgUrl = `https://github.com/${REPO}/releases/download/v${expectedVersion}/${dmgName}`;
     const windowsInstallerUrl = `https://github.com/${REPO}/releases/download/v${expectedVersion}/${windowsInstallerName}`;
-    const release = { tag, version, assets, dmg_url: dmgUrl, windows_installer_url: windowsInstallerUrl };
+    const release = {
+      tag,
+      version,
+      assets,
+      install_url: assetUrl("install.sh") || `https://github.com/${REPO}/releases/download/v${expectedVersion}/install.sh`,
+      dmg_url: assetUrl(dmgName) || dmgUrl,
+      windows_installer_url: assetUrl(windowsInstallerName) || windowsInstallerUrl,
+    };
 
     if (version !== expectedVersion) {
       return {
@@ -136,7 +144,7 @@ async function checkLatestRelease({ expectedVersion, fetchImpl, timeoutMs }) {
   } catch (error) {
     return {
       check: fail("latest_release", "GitHub latest release", error.message, { http: null }),
-      release: { tag: null, version: null, assets: [], dmg_url: null, windows_installer_url: null },
+      release: { tag: null, version: null, assets: [], install_url: null, dmg_url: null, windows_installer_url: null },
     };
   }
 }
@@ -219,7 +227,7 @@ export async function checkReleasePath({
   const checks = [];
   const { check: latestCheck, release } = await checkLatestRelease({ expectedVersion, fetchImpl, timeoutMs });
   checks.push(latestCheck);
-  checks.push(await checkInstaller({ id: "release_install", label: "GitHub release installer", url: URLS.releaseInstall, fetchImpl, timeoutMs }));
+  checks.push(await checkInstaller({ id: "release_install", label: "GitHub release installer", url: release.install_url, fetchImpl, timeoutMs }));
   checks.push(await checkInstaller({ id: "landing_install", label: "Landing installer mirror", url: URLS.landingInstall, fetchImpl, timeoutMs }));
   checks.push(await checkDmgHead({ dmgUrl: release.dmg_url, fetchImpl, timeoutMs }));
   checks.push(await checkWindowsInstallerHead({ installerUrl: release.windows_installer_url, fetchImpl, timeoutMs }));
