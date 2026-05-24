@@ -16,7 +16,7 @@ assert.match(
 );
 assert.match(
   workflow,
-  /npm run tauri -- build -- --bundles nsis/,
+  /npm run tauri -- build --bundles nsis/,
   "release workflow must build the Windows NSIS bundle",
 );
 assert.doesNotMatch(
