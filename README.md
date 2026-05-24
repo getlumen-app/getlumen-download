@@ -86,6 +86,18 @@ npm run tauri build
 # Output: src-tauri/target/release/bundle/dmg/Lumen_*.dmg
 ```
 
+### macOS install hygiene
+
+After local install/release testing, keep Finder/Spotlight unambiguous:
+
+```bash
+npm run macos:app-hygiene -- --fix
+```
+
+This archives old `/Applications/Lumen.app.backup-*` bundles, removes the
+generated Tauri `src-tauri/target/.../Lumen.app` bundle, refreshes
+LaunchServices, and verifies that macOS exposes only `/Applications/Lumen.app`.
+
 ### Environment variables
 
 | Variable | Default | Description |
