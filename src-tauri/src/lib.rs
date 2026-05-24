@@ -23,6 +23,28 @@ pub struct AppState {
     config_path: Mutex<Option<String>>,
 }
 
+#[derive(serde::Serialize)]
+struct RepairNetworkResult {
+    proxy_was_running: bool,
+    tun_was_running: bool,
+    proxy_stopped: bool,
+    tun_stopped: bool,
+    errors: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct NetworkDiagnostics {
+    effective_status: String,
+    helper_installed: bool,
+    helper_running: bool,
+    tun_running: bool,
+    external_ip: Option<String>,
+    region: Option<String>,
+    country: Option<String>,
+    asn_org: Option<String>,
+    error: Option<String>,
+}
+
 /// Detect what kind of input the user provided.
 fn detect_input_type(raw: &str) -> &'static str {
     let s = raw.trim();
@@ -311,6 +333,149 @@ async fn get_status(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn get_effective_status(state: State<'_, AppState>) -> Result<String, String> {
+    if state.singbox.lock().unwrap().is_running() {
+        return Ok("connected-proxy".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(status) = tun_commands::tun_status().await {
+            if status.singbox_running {
+                return Ok("connected-tun".to_string());
+            }
+        }
+    }
+
+    Ok("disconnected".to_string())
+}
+
+async fn fetch_external_ip_snapshot() -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(4))
+        .user_agent(concat!(
+            "Lumen/",
+            env!("CARGO_PKG_VERSION"),
+            " diagnostics"
+        ))
+        .build()
+        .map_err(|e| format!("diagnostics client: {}", e))?;
+
+    let response = client
+        .get("https://ifconfig.co/json")
+        .send()
+        .await
+        .map_err(|e| format!("external ip: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("external ip status: {}", response.status()));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("external ip parse: {}", e))
+}
+
+#[tauri::command]
+async fn network_diagnostics(state: State<'_, AppState>) -> Result<NetworkDiagnostics, String> {
+    let effective_status = get_effective_status(state).await?;
+    let mut diagnostics = NetworkDiagnostics {
+        effective_status,
+        helper_installed: false,
+        helper_running: false,
+        tun_running: false,
+        external_ip: None,
+        region: None,
+        country: None,
+        asn_org: None,
+        error: None,
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(status) = tun_commands::tun_status().await {
+            diagnostics.helper_installed = status.helper_installed;
+            diagnostics.helper_running = status.helper_running;
+            diagnostics.tun_running = status.singbox_running;
+        }
+    }
+
+    match fetch_external_ip_snapshot().await {
+        Ok(snapshot) => {
+            diagnostics.external_ip = snapshot
+                .get("ip")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
+            diagnostics.region = snapshot
+                .get("region_name")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
+            diagnostics.country = snapshot
+                .get("country")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
+            diagnostics.asn_org = snapshot
+                .get("asn_org")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
+        }
+        Err(e) => diagnostics.error = Some(e),
+    }
+
+    Ok(diagnostics)
+}
+
+#[tauri::command]
+async fn repair_network(state: State<'_, AppState>) -> Result<RepairNetworkResult, String> {
+    let proxy_was_running = state.singbox.lock().unwrap().is_running();
+    let mut result = RepairNetworkResult {
+        proxy_was_running,
+        tun_was_running: false,
+        proxy_stopped: false,
+        tun_stopped: false,
+        errors: Vec::new(),
+    };
+
+    if let Err(e) = proxy::disable_system_proxy() {
+        result.errors.push(format!("system proxy: {}", e));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for key in ["https_proxy", "http_proxy", "all_proxy"] {
+            std::process::Command::new("launchctl")
+                .args(["setenv", key, ""])
+                .output()
+                .ok();
+        }
+
+        match tun_commands::tun_status().await {
+            Ok(status) => {
+                result.tun_was_running = status.singbox_running;
+                if status.singbox_running {
+                    match tun_commands::tun_disconnect().await {
+                        Ok(()) => result.tun_stopped = true,
+                        Err(e) => result.errors.push(format!("tun: {}", e)),
+                    }
+                }
+            }
+            Err(e) => result.errors.push(format!("tun status: {}", e)),
+        }
+    }
+
+    if proxy_was_running {
+        match state.singbox.lock().unwrap().stop() {
+            Ok(()) => result.proxy_stopped = true,
+            Err(e) => result.errors.push(format!("proxy sing-box: {}", e)),
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 async fn get_proxies() -> Result<serde_json::Value, String> {
     clash_api::get_proxies().await.map_err(|e| e.to_string())
 }
@@ -411,6 +576,9 @@ pub fn run() {
             internet_health_probe,
             health_monitor_decision,
             get_status,
+            get_effective_status,
+            network_diagnostics,
+            repair_network,
             get_proxies,
             select_proxy,
             get_traffic,

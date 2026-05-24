@@ -7,11 +7,18 @@ import Logs from "./pages/Logs";
 import BottomNav from "./components/BottomNav";
 import * as tauri from "./hooks/useTauri";
 import { useKeyStore } from "./hooks/useKeyStore";
+import {
+  CONNECTION_INTENT_KEY,
+  readStoredConnectionIntent,
+  shouldSelfHealOnLaunch,
+  shouldStopTunOnDisconnect,
+  transportFromEffectiveStatus,
+  type ActiveTransport,
+  type ConnectionState,
+} from "./lib/connectionState";
 import "./App.css";
 
 type Tab = "home" | "proxies" | "settings";
-type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
-type ActiveTransport = "tun" | "proxy" | "wbstream" | null;
 
 interface ProxyNode {
   name: string;
@@ -47,6 +54,51 @@ export default function App() {
   const trafficInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const healthFailures = useRef(0);
   const fallbackSwitching = useRef(false);
+  const launchSelfHealChecked = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function syncEffectiveStatus() {
+      try {
+        const status = await tauri.getEffectiveStatus();
+        if (cancelled) return;
+        const transport = transportFromEffectiveStatus(status);
+        if (!launchSelfHealChecked.current) {
+          launchSelfHealChecked.current = true;
+          const storedIntent = readStoredConnectionIntent(localStorage.getItem(CONNECTION_INTENT_KEY));
+          if (shouldSelfHealOnLaunch(storedIntent, transport)) {
+            if (transport === "proxy") {
+              await tauri.disconnect();
+            } else {
+              await tauri.tunDisconnect();
+            }
+            if (cancelled) return;
+            setActiveTransport(null);
+            setConnectionState("disconnected");
+            setCurrentServer("Auto Select");
+            return;
+          }
+        }
+        if (transport) {
+          setActiveTransport(transport);
+          setConnectionState("connected");
+          setCurrentServer(transport === "tun" ? "Lumen TUN" : "System Proxy");
+        } else if (connectionState === "connected") {
+          setActiveTransport(null);
+          setConnectionState("disconnected");
+          setCurrentServer("Auto Select");
+        }
+      } catch (e) {
+        console.warn("effective status sync failed:", e);
+      }
+    }
+    syncEffectiveStatus();
+    const interval = setInterval(syncEffectiveStatus, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [connectionState]);
 
   // Connection timer
   useEffect(() => {
@@ -231,11 +283,13 @@ export default function App() {
     if (connectionState === "connected") {
       // Disconnect
       setConnectionState("disconnected");
+      localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
       setUploadSpeed(0);
       setDownloadSpeed(0);
       setProxyGroups([]);
       try {
-        if (activeTransport === "tun" || activeTransport === "wbstream" || useTun) {
+        const tunStatus = await tauri.tunStatus();
+        if (shouldStopTunOnDisconnect(activeTransport, useTun, tunStatus)) {
           await tauri.tunDisconnect();
         } else {
           await tauri.disconnect();
@@ -263,6 +317,7 @@ export default function App() {
         await tauri.connect(accessKey);
         setActiveTransport("proxy");
       }
+      localStorage.setItem(CONNECTION_INTENT_KEY, "connected");
       setConnectionState("connected");
     } catch (e) {
       const msg = String(e);
@@ -272,6 +327,7 @@ export default function App() {
           setCurrentServer("WB Stream");
           await tauri.tunConnectWbstreamFallback();
           setActiveTransport("wbstream");
+          localStorage.setItem(CONNECTION_INTENT_KEY, "connected");
           setConnectionState("connected");
           return;
         } catch (fallbackError) {

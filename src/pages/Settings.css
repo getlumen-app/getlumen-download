@@ -194,6 +194,11 @@
   gap: 8px;
 }
 
+.settings__actions--stack {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .settings__action-btn {
   padding: 6px 12px;
   font-size: var(--fs-sm);
@@ -209,6 +214,40 @@
 .settings__action-btn:hover {
   background: var(--accent-bg);
   border-color: var(--accent-dim);
+}
+
+.settings__action-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.settings__repair-status {
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+
+.settings__copy-status {
+  margin-top: 8px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+
+.settings__diagnostics-grid {
+  display: grid;
+  grid-template-columns: minmax(80px, 0.6fr) minmax(0, 1fr);
+  gap: 8px 12px;
+  font-size: var(--fs-sm);
+}
+
+.settings__diagnostics-grid span {
+  color: var(--fg-muted);
+}
+
+.settings__diagnostics-grid strong {
+  min-width: 0;
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .settings__update-btn {
@@ -266,7 +305,16 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   margin-bottom: 8px;
+}
+
+.settings__mini-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .settings__icon-btn {

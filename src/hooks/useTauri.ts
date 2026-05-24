@@ -25,6 +25,61 @@ export async function getStatus(): Promise<string> {
   return invoke<string>("get_status");
 }
 
+export async function getEffectiveStatus(): Promise<string> {
+  if (!IS_TAURI) return "disconnected";
+  return invoke<string>("get_effective_status");
+}
+
+export interface RepairNetworkResult {
+  proxy_was_running: boolean;
+  tun_was_running: boolean;
+  proxy_stopped: boolean;
+  tun_stopped: boolean;
+  errors: string[];
+}
+
+export interface NetworkDiagnostics {
+  effective_status: string;
+  helper_installed: boolean;
+  helper_running: boolean;
+  tun_running: boolean;
+  external_ip: string | null;
+  region: string | null;
+  country: string | null;
+  asn_org: string | null;
+  error: string | null;
+}
+
+export async function repairNetwork(): Promise<RepairNetworkResult> {
+  if (!IS_TAURI) {
+    return {
+      proxy_was_running: false,
+      tun_was_running: false,
+      proxy_stopped: false,
+      tun_stopped: false,
+      errors: [],
+    };
+  }
+  return invoke<RepairNetworkResult>("repair_network");
+}
+
+export async function networkDiagnostics(): Promise<NetworkDiagnostics> {
+  if (!IS_TAURI) {
+    return {
+      effective_status: "disconnected",
+      helper_installed: false,
+      helper_running: false,
+      tun_running: false,
+      external_ip: null,
+      region: null,
+      country: null,
+      asn_org: null,
+      error: null,
+    };
+  }
+  return invoke<NetworkDiagnostics>("network_diagnostics");
+}
+
 export async function internetHealthProbe(): Promise<boolean> {
   if (!IS_TAURI) return true;
   try {

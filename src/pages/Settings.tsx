@@ -2,6 +2,14 @@ import * as React from "react";
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useKeyStore, detectType, defaultNameFor } from "../hooks/useKeyStore";
+import * as tauri from "../hooks/useTauri";
+import {
+  CONNECTION_INTENT_KEY,
+  diagnosticLocationLabel,
+  diagnosticRouteLabel,
+  formatDiagnosticsSnapshot,
+  repairNetworkMessage,
+} from "../lib/connectionState";
 import "./Settings.css";
 
 interface TunStatus {
@@ -33,6 +41,11 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
   // VPN mode state — TUN by default, user can override
   const [tunStatus, setTunStatus] = useState<TunStatus | null>(null);
   const [tunBusy, setTunBusy] = useState(false);
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairStatus, setRepairStatus] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<tauri.NetworkDiagnostics | null>(null);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [diagnosticsCopyStatus, setDiagnosticsCopyStatus] = useState<string | null>(null);
   type VpnMode = "tun" | "proxy";
   const [vpnMode, setVpnMode] = useState<VpnMode>(
     () => (localStorage.getItem("lumen-vpn-mode") as VpnMode) || "tun"
@@ -45,6 +58,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
 
   useEffect(() => {
     refreshTunStatus();
+    refreshDiagnostics();
     const i = setInterval(refreshTunStatus, 5000);
     return () => clearInterval(i);
   }, []);
@@ -80,6 +94,62 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
       alert("Helper uninstall failed: " + e);
     } finally {
       setTunBusy(false);
+    }
+  }
+
+  async function handleRepairNetwork() {
+    setRepairBusy(true);
+    setRepairStatus(null);
+    try {
+      const result = await tauri.repairNetwork();
+      localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
+      setRepairStatus(repairNetworkMessage(result));
+      await refreshTunStatus();
+      await refreshDiagnostics();
+    } catch (e) {
+      setRepairStatus("Repair needs attention");
+      console.error("Repair network failed:", e);
+    } finally {
+      setRepairBusy(false);
+    }
+  }
+
+  async function refreshDiagnostics() {
+    setDiagnosticsBusy(true);
+    try {
+      const next = await tauri.networkDiagnostics();
+      setDiagnostics(next);
+      return next;
+    } catch (e) {
+      console.warn("network diagnostics:", e);
+      const fallback = {
+        effective_status: "disconnected",
+        helper_installed: false,
+        helper_running: false,
+        tun_running: false,
+        external_ip: null,
+        region: null,
+        country: null,
+        asn_org: null,
+        error: String(e),
+      };
+      setDiagnostics(fallback);
+      return fallback;
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  }
+
+  async function handleCopyDiagnostics() {
+    setDiagnosticsCopyStatus(null);
+    try {
+      const snapshot = diagnostics ?? (await refreshDiagnostics());
+      await navigator.clipboard.writeText(formatDiagnosticsSnapshot(snapshot));
+      setDiagnosticsCopyStatus("Copied");
+      setTimeout(() => setDiagnosticsCopyStatus(null), 2000);
+    } catch (e) {
+      console.error("copy diagnostics:", e);
+      setDiagnosticsCopyStatus("Copy failed");
     }
   }
 
@@ -234,9 +304,53 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
           </div>
         </section>
 
+        <section className="settings__section">
+          <h3 className="settings__section-title">Network Repair</h3>
+          <p className="settings__info">
+            Stops Lumen proxy and TUN processes, clears Lumen proxy environment, and returns traffic to the current Wi-Fi route.
+          </p>
+          <div className="settings__actions settings__actions--stack">
+            <button className="settings__action-btn" onClick={handleRepairNetwork} disabled={repairBusy}>
+              {repairBusy ? "Repairing..." : "Repair Network"}
+            </button>
+            {repairStatus && <span className="settings__repair-status">{repairStatus}</span>}
+          </div>
+        </section>
+
+        <section className="settings__section">
+          <div className="settings__section-head">
+            <h3 className="settings__section-title">Diagnostics</h3>
+            <div className="settings__mini-actions">
+              <button className="settings__update-btn" onClick={handleCopyDiagnostics} disabled={diagnosticsBusy}>
+                Copy Snapshot
+              </button>
+              <button className="settings__update-btn" onClick={refreshDiagnostics} disabled={diagnosticsBusy}>
+                {diagnosticsBusy ? "Checking..." : "Refresh"}
+              </button>
+            </div>
+          </div>
+          <div className="settings__diagnostics-grid">
+            <span>Route</span>
+            <strong>{diagnosticRouteLabel(diagnostics?.effective_status ?? "disconnected")}</strong>
+            <span>External IP</span>
+            <strong>{diagnostics?.external_ip ?? "Unknown"}</strong>
+            <span>Location</span>
+            <strong>{diagnostics ? diagnosticLocationLabel(diagnostics) : "Unknown"}</strong>
+            <span>Provider</span>
+            <strong>{diagnostics?.asn_org ?? "Unknown"}</strong>
+            <span>Helper</span>
+            <strong>
+              {diagnostics?.helper_running ? "Running" : diagnostics?.helper_installed ? "Installed" : "Not installed"}
+            </strong>
+            <span>TUN</span>
+            <strong>{diagnostics?.tun_running ? "Running" : "Stopped"}</strong>
+          </div>
+          {diagnosticsCopyStatus && <p className="settings__copy-status">{diagnosticsCopyStatus}</p>}
+        </section>
+
         {/* About */}
         <section className="settings__section settings__section--footer">
-          <p className="settings__version">Lumen v2.3.5</p>
+          <p className="settings__version">Lumen v2.4.0</p>
           <button className="settings__action-btn">Check for Updates</button>
           <button className="settings__logout-btn" onClick={onClearKey}>
             Sign Out
