@@ -50,6 +50,16 @@ pub fn tun_config_file_path() -> PathBuf {
     data_dir().join("config-tun.json")
 }
 
+pub fn wbstream_manifest_file_path() -> PathBuf {
+    data_dir().join("wbstream-manifest.json")
+}
+
+pub const WBSTREAM_LOCAL_SOCKS_PORT: u16 = 11080;
+pub const WBSTREAM_LOCAL_BALANCER_PORT: u16 = 11079;
+pub const WBSTREAM_LOCAL_MULTIPATH_PORT: u16 = 11078;
+pub const WBSTREAM_REMOTE_MULTIPATH_PORT: u16 = 19095;
+pub const WBSTREAM_MAX_ROOMS: usize = 3;
+
 /// Fetch config from server, generate working config, cache to disk.
 /// Server returns outbounds (proxies). Client wraps them with DNS, routing, inbounds.
 pub async fn fetch_and_cache(url: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -92,8 +102,10 @@ pub async fn fetch_and_cache_with_mode(
     }
 
     let body = resp.text().await?;
-    let server_config: serde_json::Value =
+    let mut server_config: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("Invalid config JSON: {}", e))?;
+    cache_wbstream_manifest_from_server(&server_config);
+    let _ = prefetch_wbstream_manifest_sidecar().await;
 
     // If the server returns a full sing-box config (has dns + inbounds + route),
     // use it directly — no need to rebuild. This allows the Proteus config server
@@ -105,6 +117,7 @@ pub async fn fetch_and_cache_with_mode(
 
     let config = if is_full_config {
         log::info!("Server returned full sing-box config — using as-is (mode override ignored)");
+        strip_client_side_metadata(&mut server_config);
         server_config
     } else {
         build_config_from_server(&server_config, mode)?
@@ -125,6 +138,285 @@ pub async fn fetch_and_cache_with_mode(
 
     Ok(final_json)
 }
+
+fn cache_wbstream_manifest_from_server(server_config: &serde_json::Value) {
+    let Some(manifest) = server_config.get("wbstream_manifest") else {
+        return;
+    };
+    if !is_usable_wbstream_manifest(manifest) {
+        log::warn!("Ignoring unusable WB Stream manifest metadata from config server");
+        return;
+    }
+    let path = wbstream_manifest_file_path();
+    match serde_json::to_string_pretty(manifest)
+        .map_err(|e| e.to_string())
+        .and_then(|body| std::fs::write(&path, body).map_err(|e| e.to_string()))
+    {
+        Ok(()) => log::info!("WB Stream manifest cached to {}", path.display()),
+        Err(e) => log::warn!("Could not cache WB Stream manifest: {}", e),
+    }
+}
+
+pub async fn ensure_wbstream_manifest_cached() -> Result<(), String> {
+    if load_cached_wbstream_manifest().is_ok() {
+        return Ok(());
+    }
+    prefetch_wbstream_manifest_sidecar().await
+}
+
+pub async fn prefetch_wbstream_manifest_sidecar() -> Result<(), String> {
+    let client = match reqwest::Client::builder()
+        .user_agent(concat!(
+            "Lumen/",
+            env!("CARGO_PKG_VERSION"),
+            " wbstream-prefetch"
+        ))
+        .timeout(std::time::Duration::from_secs(4))
+        .no_proxy()
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            let msg = format!("Could not build WB Stream prefetch client: {}", e);
+            log::warn!("{}", msg);
+            return Err(msg);
+        }
+    };
+    let mut last_error = None;
+    for url in WBSTREAM_MANIFEST_PREFETCH_URLS {
+        let result = async {
+            let resp = client.get(*url).send().await?;
+            if !resp.status().is_success() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("status {}", resp.status()),
+                )
+                .into());
+            }
+            let manifest: serde_json::Value = resp.json().await?;
+            if !is_usable_wbstream_manifest(&manifest) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unusable manifest shape",
+                )
+                .into());
+            }
+            let path = wbstream_manifest_file_path();
+            let body = serde_json::to_string_pretty(&manifest)?;
+            std::fs::write(&path, body)?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                log::info!("WB Stream manifest prefetched from {}", url);
+                return Ok(());
+            }
+            Err(e) => {
+                let msg = format!("WB Stream manifest prefetch failed from {}: {}", url, e);
+                log::warn!("{}", msg);
+                last_error = Some(msg);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "WB Stream manifest prefetch failed".to_string()))
+}
+
+fn is_usable_wbstream_manifest(manifest: &serde_json::Value) -> bool {
+    if manifest.get("signature_alg").and_then(|v| v.as_str()) != Some("RS256") {
+        return false;
+    }
+    if manifest
+        .get("payload_b64")
+        .and_then(|v| v.as_str())
+        .is_none()
+        || manifest.get("signature").and_then(|v| v.as_str()).is_none()
+    {
+        return false;
+    }
+    manifest
+        .get("payload")
+        .and_then(|payload| payload.get("rooms"))
+        .and_then(|rooms| rooms.as_array())
+        .map(|rooms| {
+            rooms.iter().any(|room| {
+                room.get("url")
+                    .and_then(|url| url.as_str())
+                    .map(|url| url.starts_with("wbstream://"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn strip_client_side_metadata(config: &mut serde_json::Value) {
+    if let Some(obj) = config.as_object_mut() {
+        obj.remove("wbstream_manifest");
+    }
+}
+
+pub fn load_cached_wbstream_manifest() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let path = wbstream_manifest_file_path();
+    let body = std::fs::read_to_string(&path)?;
+    let manifest: serde_json::Value = serde_json::from_str(&body)?;
+    if !is_usable_wbstream_manifest(&manifest) {
+        return Err("cached WB Stream manifest is unusable".into());
+    }
+    Ok(manifest)
+}
+
+pub fn select_wbstream_room_url(manifest: &serde_json::Value) -> Option<String> {
+    select_wbstream_room_urls(manifest, 1).into_iter().next()
+}
+
+pub fn select_wbstream_room_urls(manifest: &serde_json::Value, limit: usize) -> Vec<String> {
+    let rooms = manifest
+        .get("payload")
+        .and_then(|payload| payload.get("rooms"))
+        .and_then(|rooms| rooms.as_array());
+    let Some(rooms) = rooms else {
+        return Vec::new();
+    };
+
+    let mut candidates: Vec<(u64, String)> = rooms
+        .iter()
+        .filter_map(|room| {
+            let url = room.get("url").and_then(|url| url.as_str())?;
+            if !url.starts_with("wbstream://") {
+                return None;
+            }
+            let priority = room
+                .get("priority")
+                .and_then(|priority| priority.as_u64())
+                .unwrap_or(u64::MAX);
+            Some((priority, url.to_string()))
+        })
+        .collect();
+    candidates.sort_by_key(|(priority, _)| *priority);
+    candidates
+        .into_iter()
+        .map(|(_, url)| url)
+        .take(limit)
+        .collect()
+}
+
+pub fn save_wbstream_fallback_config(
+    mode: InboundMode,
+    local_socks_port: u16,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cfg = build_wbstream_fallback_config(mode, local_socks_port);
+    let final_json = serde_json::to_string_pretty(&cfg)?;
+    let path = match mode {
+        InboundMode::Mixed => config_file_path(),
+        InboundMode::Tun => tun_config_file_path(),
+    };
+    std::fs::write(&path, &final_json)?;
+    log::info!(
+        "WB Stream fallback config ({:?}) saved to {}",
+        mode,
+        path.display()
+    );
+    Ok(final_json)
+}
+
+fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> serde_json::Value {
+    let cache_path = data_dir().join("cache-wbstream.db");
+    let wb_domains = serde_json::json!([".wb.ru", ".wildberries.ru", ".wbbasket.ru"]);
+    let wb_endpoint_cidrs = serde_json::json!([
+        // Observed WB Stream API / LiveKit endpoints.
+        "185.62.202.8/32",
+        "194.1.214.97/32",
+        // Manifest mirror. The manifest should be cached before
+        // hard-whitelist mode, but keeping this direct avoids a control-plane
+        // loop when the mirror is still reachable.
+        "185.217.199.96/32"
+    ]);
+
+    serde_json::json!({
+        "log": {"level": "info", "timestamp": true},
+        "dns": {
+            "servers": [
+                {
+                    "tag": "dns-proxy",
+                    "address": "https://1.1.1.1/dns-query",
+                    "detour": "wbstream-local"
+                },
+                {
+                    "tag": "dns-direct",
+                    "address": "https://77.88.8.8/dns-query",
+                    "detour": "direct"
+                }
+            ],
+            "rules": [
+                {"domain_suffix": wb_domains.clone(), "server": "dns-direct"}
+            ],
+            "final": "dns-proxy",
+            "strategy": "ipv4_only"
+        },
+        "inbounds": match mode {
+            InboundMode::Mixed => serde_json::json!([
+                {
+                    "type": "mixed",
+                    "tag": "mixed-in",
+                    "listen": "127.0.0.1",
+                    "listen_port": 10808,
+                    "sniff": true,
+                    "sniff_override_destination": false
+                }
+            ]),
+            InboundMode::Tun => serde_json::json!([
+                {
+                    "type": "tun",
+                    "tag": "tun-in",
+                    "interface_name": "utun777",
+                    "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+                    "mtu": 9000,
+                    "auto_route": true,
+                    "strict_route": false,
+                    "stack": "mixed",
+                    "endpoint_independent_nat": true,
+                    "sniff": true,
+                    "sniff_override_destination": false
+                }
+            ]),
+        },
+        "outbounds": [
+            {
+                "type": "socks",
+                "tag": "wbstream-local",
+                "server": "127.0.0.1",
+                "server_port": local_socks_port,
+                "version": "5"
+            },
+            {"type": "direct", "tag": "direct"},
+            {"type": "block", "tag": "block"}
+        ],
+        "route": {
+            "rules": [
+                {"domain_suffix": wb_domains.clone(), "outbound": "direct"},
+                {"ip_cidr": wb_endpoint_cidrs.clone(), "outbound": "direct"}
+            ],
+            "final": "wbstream-local",
+            "auto_detect_interface": true
+        },
+        "experimental": {
+            "clash_api": {
+                "external_controller": "127.0.0.1:9090",
+                "default_mode": "rule"
+            },
+            "cache_file": {
+                "enabled": true,
+                "path": cache_path.to_string_lossy()
+            }
+        }
+    })
+}
+
+const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] = &[
+    "http://185.217.199.96/wbstream-manifest.json",
+    "https://config.getlumen.download/wbstream-manifest.json",
+];
 
 /// Build a single-outbound sing-box config from a parsed VLESS link.
 /// Used when user supplies a raw vless:// URI instead of a Proteus subscription.
@@ -243,7 +535,7 @@ fn build_config_from_server(
     // TCP Reality exits (flow: xtls-rprx-vision). TSPU blocks sustained
     // traffic on TCP Reality after 15-20KB while tiny URLTest probes pass,
     // causing the group to select a broken exit. Verified 2026-04-16 on
-    // @STmarkml (Moscow): proxy-tg picked netcup-tcp-reality (216ms probe)
+    // a Moscow test network: proxy-tg picked netcup-tcp-reality (216ms probe)
     // but Telegram MTProto was frozen. General proxy group keeps all exits
     // for non-RF users where TCP Reality works fine.
     let service_proxy_names: Vec<String> = outbounds
@@ -485,9 +777,9 @@ fn build_config_from_server(
         // xtls-rprx-vision) for the GENERAL proxy group too, not just proxy-tg
         // /proxy-yt. TSPU bulk-blocks sustained traffic on xtls-rprx-vision
         // after 15-20KB while tiny URLTest probes pass, causing urltest to
-        // pick a broken exit for long streams (Claude WebSocket, Discord,
-        // large downloads). Same bug pattern as @STmarkml 2026-04-16 and
-        // @voksep 2026-04-22. service_names falls back to proxy_names if all
+        // pick a broken exit for long streams (persistent WebSocket sessions,
+        // voice/media apps, large downloads). Same bug pattern as field tests
+        // on 2026-04-16 and 2026-04-22. service_names falls back to proxy_names if all
         // exits are Reality (non-RF users with a single TCP Reality exit still
         // work as before). Server-side mirror landed in template v81.
         //
@@ -893,8 +1185,8 @@ mod tests {
     /// TCP Reality exits (flow=xtls-rprx-vision), not only proxy-tg/proxy-yt.
     /// TSPU bulk-blocks sustained traffic on xtls-rprx-vision after 15-20KB
     /// while tiny URLTest probes pass → urltest picks a broken exit for long
-    /// streams (Claude WebSocket, Discord, large downloads). Same pattern as
-    /// @STmarkml 2026-04-16 and @voksep 2026-04-22. Mixing a TCP Reality exit
+    /// streams (persistent WebSocket sessions, voice/media apps, large downloads).
+    /// Same pattern as field tests on 2026-04-16 and 2026-04-22. Mixing a TCP Reality exit
     /// with safer exits (gRPC Reality / HTTPUpgrade / port-443 relay) is ONLY
     /// safe when the Reality exit is the last resort. Defense-in-depth
     /// alongside server-side template v81.
@@ -939,7 +1231,8 @@ mod tests {
             !members.contains(&"tcp-reality-1"),
             "general `proxy` group must NOT include TCP Reality (xtls-rprx-vision) \
              when safer exits exist. Got members: {:?}. This protects RU users from \
-             TSPU bulk-block on long streams (Claude, Discord, YouTube 2nd video).",
+             TSPU bulk-block on long streams (persistent WebSocket sessions, \
+             voice/media apps, large downloads).",
             members
         );
         assert!(
@@ -1040,10 +1333,7 @@ mod tests {
             r.get("outbound").and_then(|v| v.as_str()) == Some("proxy-yt")
                 && r.get("ip_cidr")
                     .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .any(|v| v.as_str() == Some("142.250.0.0/15"))
-                    })
+                    .map(|a| a.iter().any(|v| v.as_str() == Some("142.250.0.0/15")))
                     .unwrap_or(false)
         });
         assert!(
@@ -1076,5 +1366,150 @@ mod tests {
                 cidrs
             );
         }
+    }
+
+    #[test]
+    fn wbstream_manifest_metadata_is_shape_checked() {
+        let manifest = serde_json::json!({
+            "payload": {
+                "kind": "proteus-wbstream-room-manifest",
+                "rooms": [
+                    { "role": "active", "priority": 0, "url": "wbstream://019e3d05-046e-7af4-8ca6-5d81631bf9aa" }
+                ]
+            },
+            "payload_b64": "e30=",
+            "signature_alg": "RS256",
+            "signature": "sig"
+        });
+        assert!(is_usable_wbstream_manifest(&manifest));
+
+        let bad_manifest = serde_json::json!({
+            "payload": { "rooms": [{ "url": "https://example.com" }] },
+            "payload_b64": "e30=",
+            "signature_alg": "RS256",
+            "signature": "sig"
+        });
+        assert!(!is_usable_wbstream_manifest(&bad_manifest));
+    }
+
+    #[test]
+    fn client_side_metadata_is_removed_before_full_singbox_write() {
+        let mut cfg = serde_json::json!({
+            "dns": {},
+            "inbounds": [],
+            "route": {},
+            "wbstream_manifest": {
+                "payload": { "rooms": [{ "url": "wbstream://room" }] },
+                "payload_b64": "e30=",
+                "signature_alg": "RS256",
+                "signature": "sig"
+            }
+        });
+        strip_client_side_metadata(&mut cfg);
+        assert!(cfg.get("wbstream_manifest").is_none());
+        assert!(cfg.get("dns").is_some());
+        assert!(cfg.get("inbounds").is_some());
+        assert!(cfg.get("route").is_some());
+    }
+
+    #[test]
+    fn wbstream_room_selection_prefers_lowest_priority() {
+        let manifest = serde_json::json!({
+            "payload": {
+                "kind": "proteus-wbstream-room-manifest",
+                "rooms": [
+                    { "role": "standby", "priority": 1, "url": "wbstream://standby" },
+                    { "role": "active", "priority": 0, "url": "wbstream://active" }
+                ]
+            },
+            "payload_b64": "e30=",
+            "signature_alg": "RS256",
+            "signature": "sig"
+        });
+        assert_eq!(
+            select_wbstream_room_url(&manifest).as_deref(),
+            Some("wbstream://active")
+        );
+    }
+
+    #[test]
+    fn wbstream_room_selection_can_return_multiple_sorted_rooms() {
+        let manifest = serde_json::json!({
+            "payload": {
+                "kind": "proteus-wbstream-room-manifest",
+                "rooms": [
+                    { "role": "next", "priority": 2, "url": "wbstream://next" },
+                    { "role": "standby", "priority": 1, "url": "wbstream://standby" },
+                    { "role": "active", "priority": 0, "url": "wbstream://active" },
+                    { "role": "bad", "priority": 3, "url": "https://example.invalid" }
+                ]
+            },
+            "payload_b64": "e30=",
+            "signature_alg": "RS256",
+            "signature": "sig"
+        });
+
+        assert_eq!(
+            select_wbstream_room_urls(&manifest, 3),
+            vec![
+                "wbstream://active".to_string(),
+                "wbstream://standby".to_string(),
+                "wbstream://next".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn wbstream_fallback_config_routes_data_plane_and_keeps_wb_direct() {
+        let cfg = build_wbstream_fallback_config(InboundMode::Tun, 11080);
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+        assert!(outbounds.iter().any(|o| {
+            o.get("tag").and_then(|v| v.as_str()) == Some("wbstream-local")
+                && o.get("type").and_then(|v| v.as_str()) == Some("socks")
+        }));
+        assert_eq!(
+            cfg.get("route")
+                .and_then(|r| r.get("final"))
+                .and_then(|v| v.as_str()),
+            Some("wbstream-local")
+        );
+        let rules = cfg
+            .get("route")
+            .and_then(|r| r.get("rules"))
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(
+            rules.iter().any(|r| {
+                r.get("outbound").and_then(|v| v.as_str()) == Some("direct")
+                    && r.get("domain_suffix")
+                        .and_then(|v| v.as_array())
+                        .map(|domains| domains.iter().any(|d| d.as_str() == Some(".wb.ru")))
+                        .unwrap_or(false)
+            }),
+            "WB endpoints must stay direct so the sidecar is not captured by the TUN route"
+        );
+    }
+
+    #[test]
+    fn wbstream_fallback_config_can_route_to_balancer_port() {
+        let cfg = build_wbstream_fallback_config(InboundMode::Tun, WBSTREAM_LOCAL_BALANCER_PORT);
+        let outbound = cfg
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .find(|o| o.get("tag").and_then(|v| v.as_str()) == Some("wbstream-local"))
+            .expect("wbstream-local outbound");
+
+        assert_eq!(
+            outbound.get("server_port").and_then(|v| v.as_u64()),
+            Some(WBSTREAM_LOCAL_BALANCER_PORT as u64)
+        );
+        assert_eq!(
+            cfg.get("route")
+                .and_then(|r| r.get("final"))
+                .and_then(|v| v.as_str()),
+            Some("wbstream-local")
+        );
     }
 }

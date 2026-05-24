@@ -1,5 +1,6 @@
 mod clash_api;
 mod config;
+mod health_monitor;
 mod proxy;
 mod singbox;
 #[cfg(target_os = "macos")]
@@ -7,6 +8,11 @@ mod tun_commands;
 #[cfg(target_os = "macos")]
 mod tun_helper;
 mod vless;
+#[cfg(target_os = "macos")]
+mod wbstream;
+#[cfg(target_os = "macos")]
+mod wbstream_balancer;
+pub mod wbstream_multipath;
 
 use std::sync::Mutex;
 use tauri::State;
@@ -247,6 +253,57 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn internet_health_probe() -> Result<bool, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(4))
+        .user_agent(concat!(
+            "Lumen/",
+            env!("CARGO_PKG_VERSION"),
+            " health-probe"
+        ))
+        .build()
+        .map_err(|e| format!("health probe client: {}", e))?;
+
+    for url in [
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "http://example.com/",
+    ] {
+        if let Ok(resp) = client.get(url).send().await {
+            if resp.status().is_success() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[tauri::command]
+fn health_monitor_decision(
+    transport: String,
+    previous_failures: u8,
+    probe_ok: bool,
+) -> Result<health_monitor::HealthDecision, String> {
+    let transport = health_monitor::TransportKind::parse(&transport)
+        .ok_or_else(|| format!("unknown transport: {}", transport))?;
+    let outcome = if probe_ok {
+        health_monitor::ProbeOutcome::Healthy
+    } else {
+        health_monitor::ProbeOutcome::Failed
+    };
+    let consecutive_failures = health_monitor::next_failure_count(previous_failures, outcome);
+    let action = health_monitor::decide_action(
+        transport,
+        consecutive_failures,
+        health_monitor::HealthPolicy::default(),
+    );
+    Ok(health_monitor::HealthDecision {
+        consecutive_failures,
+        action: action.as_str(),
+    })
+}
+
+#[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<String, String> {
     let running = state.singbox.lock().unwrap().is_running();
     Ok(if running { "connected" } else { "disconnected" }.to_string())
@@ -350,6 +407,8 @@ pub fn run() {
             fetch_config,
             connect,
             disconnect,
+            internet_health_probe,
+            health_monitor_decision,
             get_status,
             get_proxies,
             select_proxy,
@@ -370,7 +429,13 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tun_commands::tun_connect,
             #[cfg(target_os = "macos")]
+            tun_commands::tun_connect_wbstream_fallback,
+            #[cfg(target_os = "macos")]
             tun_commands::tun_disconnect,
+            #[cfg(target_os = "macos")]
+            tun_commands::wbstream_fallback_status,
+            #[cfg(target_os = "macos")]
+            tun_commands::wbstream_stop_sidecar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

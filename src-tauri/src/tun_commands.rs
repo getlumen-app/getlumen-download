@@ -1,6 +1,7 @@
 /// Tauri commands exposed to React for TUN mode (via privileged helper).
 use crate::config;
 use crate::tun_helper::{self, Request, Response};
+use crate::wbstream::{self, WbstreamFallbackStatus};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::Manager;
@@ -136,9 +137,41 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
     }
 }
 
+/// Hard-whitelist fallback: join a cached WB Stream room, expose a local SOCKS
+/// bridge, then start TUN sing-box with route.final -> that local SOCKS.
+/// The React shell calls this automatically after normal TUN health checks fail
+/// repeatedly, and the command remains separate so diagnostics can invoke it
+/// directly without duplicating fallback setup.
+#[tauri::command]
+pub async fn tun_connect_wbstream_fallback(app: tauri::AppHandle) -> Result<u32, String> {
+    let socks_port = wbstream::start_sidecar_from_cached_manifest(&app).await?;
+    config::save_wbstream_fallback_config(config::InboundMode::Tun, socks_port)
+        .map_err(|e| format!("WB Stream fallback config failed: {}", e))?;
+
+    let config_path = config::tun_config_file_path().to_string_lossy().to_string();
+    let singbox_path = bundled_singbox_path(&app)?;
+    match tun_helper::send(Request::Start {
+        config_path,
+        singbox_path: singbox_path.to_string_lossy().to_string(),
+    })
+    .await?
+    {
+        Response::Started { pid } => Ok(pid),
+        Response::Error { message } => {
+            wbstream::stop_sidecar();
+            Err(message)
+        }
+        other => {
+            wbstream::stop_sidecar();
+            Err(format!("Unexpected response: {:?}", other))
+        }
+    }
+}
+
 /// Disconnect TUN: stop sing-box via helper.
 #[tauri::command]
 pub async fn tun_disconnect() -> Result<(), String> {
+    wbstream::stop_sidecar();
     match tun_helper::send(Request::Stop).await? {
         Response::Stopped => Ok(()),
         Response::Error { message } => Err(message),
@@ -149,11 +182,23 @@ pub async fn tun_disconnect() -> Result<(), String> {
 /// Stop sing-box.
 #[tauri::command]
 pub async fn tun_stop() -> Result<(), String> {
+    wbstream::stop_sidecar();
     match tun_helper::send(Request::Stop).await? {
         Response::Stopped => Ok(()),
         Response::Error { message } => Err(message),
         other => Err(format!("Unexpected response: {:?}", other)),
     }
+}
+
+#[tauri::command]
+pub fn wbstream_fallback_status(app: tauri::AppHandle) -> Result<WbstreamFallbackStatus, String> {
+    Ok(wbstream::fallback_status(&app))
+}
+
+#[tauri::command]
+pub fn wbstream_stop_sidecar() -> Result<(), String> {
+    wbstream::stop_sidecar();
+    Ok(())
 }
 
 /// Resolve bundled installer + helper paths.

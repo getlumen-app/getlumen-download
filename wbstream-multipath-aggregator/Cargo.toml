@@ -1,0 +1,20 @@
+[package]
+name = "wbstream-multipath-aggregator-lab"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+
+[[bin]]
+name = "wbstream_multipath_aggregator"
+path = "src/main.rs"
+
+[[bin]]
+name = "wbstream_multipath_client"
+path = "src/client.rs"
+
+[[bin]]
+name = "wbstream_mock_path"
+path = "src/mock_path.rs"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }

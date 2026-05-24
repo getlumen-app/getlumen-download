@@ -25,6 +25,34 @@ export async function getStatus(): Promise<string> {
   return invoke<string>("get_status");
 }
 
+export async function internetHealthProbe(): Promise<boolean> {
+  if (!IS_TAURI) return true;
+  try {
+    return await invoke<boolean>("internet_health_probe");
+  } catch {
+    return false;
+  }
+}
+
+export async function healthMonitorDecision(
+  transport: "tun" | "proxy" | "wbstream",
+  previousFailures: number,
+  probeOk: boolean
+): Promise<{ consecutive_failures: number; action: "stay" | "switch_to_wbstream" }> {
+  if (!IS_TAURI) {
+    const consecutive_failures = probeOk ? 0 : previousFailures + 1;
+    return {
+      consecutive_failures,
+      action: transport === "tun" && consecutive_failures >= 2 ? "switch_to_wbstream" : "stay",
+    };
+  }
+  return invoke("health_monitor_decision", {
+    transport,
+    previousFailures,
+    probeOk,
+  });
+}
+
 export async function getProxies(): Promise<Record<string, unknown> | null> {
   if (!IS_TAURI) return null;
   try {
@@ -79,6 +107,11 @@ export async function isTunAvailable(): Promise<boolean> {
 export async function tunConnect(key: string): Promise<number> {
   if (!IS_TAURI) return 0;
   return invoke<number>("tun_connect", { key });
+}
+
+export async function tunConnectWbstreamFallback(): Promise<number> {
+  if (!IS_TAURI) return 0;
+  return invoke<number>("tun_connect_wbstream_fallback");
 }
 
 export async function tunDisconnect(): Promise<void> {

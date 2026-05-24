@@ -11,6 +11,7 @@ import "./App.css";
 
 type Tab = "home" | "proxies" | "settings";
 type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
+type ActiveTransport = "tun" | "proxy" | "wbstream" | null;
 
 interface ProxyNode {
   name: string;
@@ -42,7 +43,10 @@ export default function App() {
   const [proxyGroups, setProxyGroups] = useState<ProxyGroup[]>([]);
   const [connectionTime, setConnectionTime] = useState(0);
   const [showLogs, setShowLogs] = useState(false);
+  const [activeTransport, setActiveTransport] = useState<ActiveTransport>(null);
   const trafficInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const healthFailures = useRef(0);
+  const fallbackSwitching = useRef(false);
 
   // Connection timer
   useEffect(() => {
@@ -161,6 +165,60 @@ export default function App() {
     return () => clearInterval(interval);
   }, [connectionState, fetchProxyData]);
 
+  useEffect(() => {
+    if (connectionState !== "connected" || activeTransport !== "tun") {
+      healthFailures.current = 0;
+      return;
+    }
+
+    let cancelled = false;
+    async function checkHealth() {
+      if (cancelled || fallbackSwitching.current || activeTransport !== "tun") return;
+      const probeOk = await tauri.internetHealthProbe();
+      const decision = await tauri.healthMonitorDecision(
+        "tun",
+        healthFailures.current,
+        probeOk
+      );
+      healthFailures.current = decision.consecutive_failures;
+      if (decision.action !== "switch_to_wbstream") return;
+
+      fallbackSwitching.current = true;
+      setConnectionState("connecting");
+      setCurrentServer("WB Stream");
+      setErrorMsg("");
+      try {
+        await tauri.tunDisconnect();
+      } catch (e) {
+        console.warn("TUN stop before WB Stream fallback:", e);
+      }
+      try {
+        await tauri.tunConnectWbstreamFallback();
+        if (!cancelled) {
+          healthFailures.current = 0;
+          setActiveTransport("wbstream");
+          setConnectionState("connected");
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setErrorMsg(`WB Stream fallback failed: ${e}`);
+          setConnectionState("error");
+          setActiveTransport(null);
+        }
+      } finally {
+        fallbackSwitching.current = false;
+      }
+    }
+
+    const warmup = setTimeout(checkHealth, 5000);
+    const interval = setInterval(checkHealth, 10000);
+    return () => {
+      cancelled = true;
+      clearTimeout(warmup);
+      clearInterval(interval);
+    };
+  }, [connectionState, activeTransport]);
+
   async function handleConnect() {
     // Mode resolution:
     //   1. If user explicitly chose 'proxy' in Settings → system proxy
@@ -177,13 +235,17 @@ export default function App() {
       setDownloadSpeed(0);
       setProxyGroups([]);
       try {
-        if (useTun) {
+        if (activeTransport === "tun" || activeTransport === "wbstream" || useTun) {
           await tauri.tunDisconnect();
         } else {
           await tauri.disconnect();
         }
       } catch (e) {
         console.error("Disconnect error:", e);
+      } finally {
+        setActiveTransport(null);
+        setCurrentServer("Auto Select");
+        healthFailures.current = 0;
       }
       return;
     }
@@ -195,18 +257,35 @@ export default function App() {
     try {
       if (useTun) {
         await tauri.tunConnect(accessKey);
+        setActiveTransport("tun");
+        healthFailures.current = 0;
       } else {
         await tauri.connect(accessKey);
+        setActiveTransport("proxy");
       }
       setConnectionState("connected");
     } catch (e) {
       const msg = String(e);
       console.error("Connect error:", msg);
-      setErrorMsg(msg);
+      if (useTun) {
+        try {
+          setCurrentServer("WB Stream");
+          await tauri.tunConnectWbstreamFallback();
+          setActiveTransport("wbstream");
+          setConnectionState("connected");
+          return;
+        } catch (fallbackError) {
+          console.error("WB Stream fallback error:", fallbackError);
+          setErrorMsg(`${msg}; WB Stream fallback failed: ${fallbackError}`);
+        }
+      } else {
+        setErrorMsg(msg);
+      }
       setConnectionState("error");
+      setActiveTransport(null);
       // Reset to disconnected after showing error
       setTimeout(() => {
-        if (connectionState === "error") setConnectionState("disconnected");
+        setConnectionState((state) => (state === "error" ? "disconnected" : state));
       }, 5000);
     }
   }

@@ -30,7 +30,7 @@ curl -sL https://github.com/getlumen-app/getlumen-download/releases/latest/downl
 - One-tap VPN connection via sing-box core
 - Auto-select best server (urltest) or manual switch
 - Proxy list with country flags, latency, collapsible groups
-- Light theme (Notion-inspired) / Dark theme (Cursor-inspired)
+- Light theme / Dark theme
 - System theme detection, manual override in Settings
 - Config auto-fetch from subscription server
 - Offline mode with cached config
@@ -116,4 +116,4 @@ Font: Inter (UI) + JetBrains Mono (data).
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE)
+GPL-3.0.

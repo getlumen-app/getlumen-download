@@ -12,8 +12,8 @@
 # To skip in an emergency (do NOT do this unless you understand what you
 # are pushing):  git push --no-verify
 #
-# See .claude/rules/lumen-ship-checklist.md Gates 8 and 9 for the full
-# policy this hook enforces.
+# Keep this hook self-contained so the public repo does not depend on private
+# maintainer runbooks.
 
 set -e
 

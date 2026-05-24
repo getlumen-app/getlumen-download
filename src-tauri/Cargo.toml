@@ -1,11 +1,12 @@
 [package]
 name = "lumen"
-version = "2.3.5"
+version = "2.4.0"
 description = "Lumen VPN Client"
 authors = []
 license = "GPL-3.0"
 edition = "2021"
 rust-version = "1.77.2"
+default-run = "lumen"
 
 [lib]
 name = "app_lib"

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Lumen",
-  "version": "2.3.5",
+  "version": "2.4.0",
   "identifier": "io.getlumen.app",
   "build": {
     "frontendDist": "../dist",
@@ -31,6 +31,8 @@
     "targets": ["dmg", "app", "nsis"],
     "resources": [
       "../bin/sing-box",
+      "../bin/headless-wbstream-joiner",
+      "../bin/wbstream_multipath_client",
       "../bin/lumen-helper",
       "../bin/lumen-installer"
     ],
