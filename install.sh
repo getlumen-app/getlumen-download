@@ -97,10 +97,16 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 log "Mounting DMG"
-mount_output="$(hdiutil attach "$dmg_path" -nobrowse -noautoopen 2>&1)"
-MOUNT_POINT="$(printf '%s\n' "$mount_output" | awk '/\\/Volumes\\// {print $NF; exit}')"
+if ! mount_output="$(hdiutil attach "$dmg_path" -nobrowse -noautoopen 2>&1)"; then
+  printf '%s\n' "$mount_output" >&2
+  fail "failed to attach DMG"
+fi
+MOUNT_POINT="$(printf '%s\n' "$mount_output" | awk -F '\t' 'index($0, "/Volumes/") {print $NF; exit}')"
 
-[ -n "$MOUNT_POINT" ] && [ -d "$MOUNT_POINT" ] || fail "failed to mount DMG"
+[ -n "$MOUNT_POINT" ] && [ -d "$MOUNT_POINT" ] || {
+  printf '%s\n' "$mount_output" >&2
+  fail "failed to find mounted DMG volume"
+}
 [ -d "$MOUNT_POINT/$APP_NAME.app" ] || fail "DMG does not contain $APP_NAME.app"
 
 log "Installing to $INSTALL_DIR/$APP_NAME.app"
