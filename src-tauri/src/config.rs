@@ -1573,3 +1573,107 @@ mod cache_fallback_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
+// ---- P1a: bootstrap-over-own-cached-exit (L2) — pure helpers ----------------
+// When the config endpoint is blocked, we fetch a fresh config THROUGH one of
+// the user's OWN cached Reality exits. These helpers build that bootstrap tunnel
+// config. No bundled secrets: they only ever read the user's cached config.
+
+/// Pick a usable Reality outbound from a cached/server config to serve as the
+/// bootstrap tunnel. Prefers a direct (non-relay) tcp/Vision exit; falls back to
+/// any Reality outbound. Returns None if the config has no Reality exit.
+pub fn extract_bootstrap_exit(config: &serde_json::Value) -> Option<serde_json::Value> {
+    let obs = config.get("outbounds")?.as_array()?;
+    let is_reality = |o: &serde_json::Value| -> bool {
+        o.get("type").and_then(|t| t.as_str()) == Some("vless")
+            && o.get("tls").and_then(|tls| tls.get("reality")).is_some()
+    };
+    let is_direct = |o: &serde_json::Value| -> bool {
+        let tag = o
+            .get("tag")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let relayish = ["relay", "moscow", "firstbyte", "timeweb", "via"]
+            .iter()
+            .any(|k| tag.contains(k));
+        let tcp = o
+            .get("transport")
+            .and_then(|tr| tr.get("type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("tcp")
+            == "tcp";
+        let vision = o.get("flow").and_then(|f| f.as_str()).unwrap_or("") == "xtls-rprx-vision";
+        !relayish && (tcp || vision)
+    };
+    obs.iter()
+        .find(|o| is_reality(o) && is_direct(o))
+        .cloned()
+        .or_else(|| obs.iter().find(|o| is_reality(o)).cloned())
+}
+
+/// Build a minimal sing-box config exposing a local SOCKS/mixed proxy that
+/// routes through one Reality `exit` outbound. Used to fetch the config gateway
+/// THROUGH a working tunnel when the endpoint is locally (SNI-)blocked.
+pub fn build_bootstrap_proxy_config(exit: &serde_json::Value, port: u16) -> serde_json::Value {
+    let tag = exit
+        .get("tag")
+        .and_then(|t| t.as_str())
+        .unwrap_or("bootstrap-exit")
+        .to_string();
+    serde_json::json!({
+        "log": { "level": "warn" },
+        "dns": { "servers": [{ "address": "1.1.1.1" }] },
+        "inbounds": [{
+            "type": "mixed",
+            "tag": "bootstrap-socks",
+            "listen": "127.0.0.1",
+            "listen_port": port
+        }],
+        "outbounds": [ exit, { "type": "direct", "tag": "direct" } ],
+        "route": { "final": tag }
+    })
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn extract_bootstrap_exit_prefers_direct_reality_over_relay() {
+        let cfg = serde_json::json!({"outbounds": [
+            {"type":"vless","tag":"relay-eu-1","tls":{"reality":{}},"transport":{"type":"httpupgrade"}},
+            {"type":"vless","tag":"netcup-tcp-reality","flow":"xtls-rprx-vision","tls":{"reality":{}}},
+            {"type":"direct","tag":"direct"}
+        ]});
+        let e = extract_bootstrap_exit(&cfg).expect("should find a direct reality exit");
+        assert_eq!(e.get("tag").and_then(|t| t.as_str()), Some("netcup-tcp-reality"));
+    }
+
+    #[test]
+    fn extract_bootstrap_exit_falls_back_to_any_reality() {
+        let cfg = serde_json::json!({"outbounds": [
+            {"type":"vless","tag":"relay-eu-1","tls":{"reality":{}},"transport":{"type":"grpc"}}
+        ]});
+        assert!(extract_bootstrap_exit(&cfg).is_some(), "any reality exit is acceptable fallback");
+    }
+
+    #[test]
+    fn extract_bootstrap_exit_none_when_no_reality() {
+        let cfg = serde_json::json!({"outbounds": [{"type":"direct","tag":"direct"}]});
+        assert!(extract_bootstrap_exit(&cfg).is_none());
+    }
+
+    #[test]
+    fn build_bootstrap_proxy_config_has_socks_inbound_and_routes_via_exit() {
+        let exit = serde_json::json!({"type":"vless","tag":"x-exit","tls":{"reality":{}}});
+        let c = build_bootstrap_proxy_config(&exit, 11991);
+        assert_eq!(c["inbounds"][0]["type"], "mixed");
+        assert_eq!(c["inbounds"][0]["listen"], "127.0.0.1");
+        assert_eq!(c["inbounds"][0]["listen_port"], 11991);
+        assert_eq!(c["route"]["final"], "x-exit");
+        assert_eq!(c["outbounds"][0]["tag"], "x-exit");
+        assert_eq!(c["outbounds"][1]["type"], "direct");
+    }
+}
