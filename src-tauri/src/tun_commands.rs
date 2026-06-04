@@ -117,9 +117,40 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
                 s
             )
         };
-        config::fetch_and_cache_with_mode(&url, config::InboundMode::Tun)
-            .await
-            .map_err(|e| format!("Config fetch failed: {}", e))?;
+        match config::fetch_and_cache_with_mode(&url, config::InboundMode::Tun).await {
+            Ok(_) => {
+                // Server fetch = full multi-exit config. Preserve an immutable
+                // last-good copy so a later single-`vless://` connect (which
+                // overwrites config-tun.json) cannot clobber the fallback.
+                if let Ok(good) = std::fs::read_to_string(config::tun_config_file_path()) {
+                    let _ = std::fs::write(config::tun_config_lastgood_path(), good);
+                }
+            }
+            Err(fetch_err) => {
+                // Control-plane (config endpoint) may be censored / unreachable
+                // (e.g. SNI-blocked on a hostile network). The data-plane still
+                // works, so fall back to the last-good cached config instead of
+                // failing (which would eagerly drop to the wbstream carrier). No
+                // secrets: this only reuses the user own previously-fetched config.
+                match config::load_cached_tun_config() {
+                    Ok(cached) => {
+                        std::fs::write(config::tun_config_file_path(), &cached).map_err(|e| {
+                            format!("Config fetch failed: {}; cache write failed: {}", fetch_err, e)
+                        })?;
+                        log::warn!(
+                            "Config fetch failed ({}); connecting from last-good cached config",
+                            fetch_err
+                        );
+                    }
+                    Err(cache_err) => {
+                        return Err(format!(
+                            "Config fetch failed: {} (no usable cached config: {})",
+                            fetch_err, cache_err
+                        ));
+                    }
+                }
+            }
+        }
     }
     let config_path = config::tun_config_file_path().to_string_lossy().to_string();
 

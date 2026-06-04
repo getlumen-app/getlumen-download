@@ -50,6 +50,43 @@ pub fn tun_config_file_path() -> PathBuf {
     data_dir().join("config-tun.json")
 }
 
+/// Immutable last-good full TUN config. Written ONLY on a successful server
+/// fetch, so it survives a single pasted `vless://` overwriting config-tun.json.
+pub fn tun_config_lastgood_path() -> PathBuf {
+    data_dir().join("config-tun-lastgood.json")
+}
+
+/// Load the last-good cached TUN config for offline / censored-bootstrap
+/// fallback (e.g. when the config endpoint is SNI-blocked on a hostile network).
+/// Prefers the immutable last-good copy, then the active config. Validates that
+/// outbounds exist so sing-box never starts on garbage. No secrets: this only
+/// ever returns the user's own previously-fetched config.
+pub fn load_cached_tun_config() -> Result<String, Box<dyn std::error::Error>> {
+    let lastgood = tun_config_lastgood_path();
+    if lastgood.exists() {
+        if let Ok(s) = load_cached_tun_config_from(&lastgood) {
+            return Ok(s);
+        }
+    }
+    load_cached_tun_config_from(&tun_config_file_path())
+}
+
+fn load_cached_tun_config_from(
+    path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let body = std::fs::read_to_string(path)?;
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    let has_outbounds = v
+        .get("outbounds")
+        .and_then(|o| o.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if !has_outbounds {
+        return Err("cached TUN config has no outbounds".into());
+    }
+    Ok(body)
+}
+
 pub fn wbstream_manifest_file_path() -> PathBuf {
     data_dir().join("wbstream-manifest.json")
 }
@@ -1506,5 +1543,33 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("wbstream-local")
         );
+    }
+}
+
+#[cfg(test)]
+mod cache_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn load_cached_tun_config_from_validates_outbounds() {
+        let dir = std::env::temp_dir().join(format!("lumen-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let good = dir.join("good.json");
+        std::fs::write(&good, r#"{"outbounds":[{"type":"vless","tag":"x"}]}"#).unwrap();
+        assert!(load_cached_tun_config_from(&good).is_ok(), "valid config with outbounds must load");
+
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, r#"{"outbounds":[]}"#).unwrap();
+        assert!(load_cached_tun_config_from(&empty).is_err(), "empty outbounds must be rejected");
+
+        let garbage = dir.join("garbage.json");
+        std::fs::write(&garbage, "not json").unwrap();
+        assert!(load_cached_tun_config_from(&garbage).is_err(), "invalid json must be rejected");
+
+        let missing = dir.join("missing.json");
+        assert!(load_cached_tun_config_from(&missing).is_err(), "missing file must be rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
