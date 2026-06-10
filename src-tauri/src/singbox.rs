@@ -1,6 +1,23 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Build a `Command` that never flashes a console window on Windows.
+/// A child process spawned without `CREATE_NO_WINDOW` briefly pops a console
+/// window. `get_effective_status` polls `is_running()` every 5s (plus the
+/// connect/disconnect kill paths), so a missing flag made the whole screen
+/// blink every 5 seconds (Polina, Windows, 2026-06-10). Every process spawn in
+/// this module goes through this one builder so the flag can never be missed.
+fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 pub struct SingboxManager {
     running: bool,
 }
@@ -23,14 +40,14 @@ impl SingboxManager {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&singbox_bin, std::fs::Permissions::from_mode(0o755)).ok();
-            Command::new("xattr")
+            silent_command("xattr")
                 .args(["-d", "com.apple.quarantine", &singbox_bin])
                 .output()
                 .ok();
         }
 
         // Validate config (env var required for legacy DNS server format support)
-        let check = Command::new(&singbox_bin)
+        let check = silent_command(&singbox_bin)
             .args(["check", "-c", config_path])
             .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
             .output()
@@ -62,30 +79,15 @@ impl SingboxManager {
             log_path.display()
         );
 
-        #[cfg(unix)]
-        {
-            Command::new(&singbox_bin)
-                .args(["run", "-c", config_path])
-                .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
-                .stdout(std::process::Stdio::from(log_file))
-                .stderr(std::process::Stdio::from(log_err))
-                .spawn()
-                .map_err(|e| format!("Failed to start sing-box: {}", e))?;
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            Command::new(&singbox_bin)
-                .args(["run", "-c", config_path])
-                .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
-                .stdout(std::process::Stdio::from(log_file))
-                .stderr(std::process::Stdio::from(log_err))
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|e| format!("Failed to start sing-box: {}", e))?;
-        }
+        // One spawn for both platforms; silent_command() adds CREATE_NO_WINDOW
+        // on Windows so sing-box never flashes a console window.
+        silent_command(&singbox_bin)
+            .args(["run", "-c", config_path])
+            .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_err))
+            .spawn()
+            .map_err(|e| format!("Failed to start sing-box: {}", e))?;
 
         // Wait for startup
         std::thread::sleep(std::time::Duration::from_secs(3));
@@ -119,7 +121,7 @@ impl SingboxManager {
     fn check_running_static() -> bool {
         #[cfg(unix)]
         {
-            Command::new("pgrep")
+            silent_command("pgrep")
                 .args(["-f", "sing-box run"])
                 .output()
                 .map(|o| o.status.success())
@@ -127,7 +129,7 @@ impl SingboxManager {
         }
         #[cfg(windows)]
         {
-            Command::new("tasklist")
+            silent_command("tasklist")
                 .args(["/FI", "IMAGENAME eq sing-box.exe", "/NH"])
                 .output()
                 .map(|o| {
@@ -141,11 +143,11 @@ impl SingboxManager {
     fn kill_all() {
         #[cfg(unix)]
         {
-            Command::new("killall").arg("sing-box").output().ok();
+            silent_command("killall").arg("sing-box").output().ok();
         }
         #[cfg(windows)]
         {
-            Command::new("taskkill")
+            silent_command("taskkill")
                 .args(["/F", "/IM", "sing-box.exe"])
                 .output()
                 .ok();
@@ -155,14 +157,14 @@ impl SingboxManager {
     fn force_kill() {
         #[cfg(unix)]
         {
-            Command::new("pkill")
+            silent_command("pkill")
                 .args(["-9", "-f", "sing-box run"])
                 .output()
                 .ok();
         }
         #[cfg(windows)]
         {
-            Command::new("taskkill")
+            silent_command("taskkill")
                 .args(["/F", "/IM", "sing-box.exe"])
                 .output()
                 .ok();
@@ -265,6 +267,39 @@ impl Drop for SingboxManager {
 mod tests {
     use super::SingboxManager;
     use std::path::{Path, PathBuf};
+
+    /// Regression for the Windows "screen blinks every ~5s" bug (Polina, 2026-06-10).
+    /// Root cause: process-status spawns (`tasklist`/`taskkill`) on Windows were
+    /// created WITHOUT `CREATE_NO_WINDOW`, so a console window flashed every time
+    /// `is_running()` ran — which the UI polls every 5s via `get_effective_status`.
+    /// The sing-box `run` spawn already had the flag; the status/kill spawns were
+    /// missed. Durable invariant: EVERY process spawn in this module goes through
+    /// the single `silent_command()` builder (which applies `CREATE_NO_WINDOW` on
+    /// Windows). So the raw constructor must appear exactly once — inside
+    /// `silent_command` itself. Any new bare spawn re-introduces the console-flash
+    /// bug and fails this test on the macOS host (no Windows box needed). The
+    /// needle is assembled at runtime so this test's own source does not match it.
+    #[test]
+    fn all_process_spawns_go_through_silent_command_no_window() {
+        let src = include_str!("singbox.rs");
+        let raw_ctor = ["Command", "::new("].concat();
+        let raw_count = src.matches(raw_ctor.as_str()).count();
+        assert_eq!(
+            raw_count, 1,
+            "every process spawn must go through silent_command() so Windows gets \
+             CREATE_NO_WINDOW (no 5s console-window flash); found {} raw constructors \
+             (expected exactly 1, inside the helper)",
+            raw_count
+        );
+        assert!(
+            src.contains(&["fn silent_", "command"].concat()),
+            "silent_command() helper must exist"
+        );
+        assert!(
+            src.contains("CREATE_NO_WINDOW"),
+            "CREATE_NO_WINDOW flag must be applied for Windows spawns"
+        );
+    }
 
     #[test]
     fn macos_prefers_tauri_up_bin_before_legacy_resource_root() {
