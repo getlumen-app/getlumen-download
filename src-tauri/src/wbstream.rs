@@ -8,6 +8,20 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 use tokio::net::TcpStream;
 
+/// Build a `Command` that never flashes a console window on Windows
+/// (CREATE_NO_WINDOW). Mirrors `singbox::silent_command`; WB Stream sidecars
+/// are otherwise short-lived child processes that would pop a console window.
+fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 static SIDECARS: OnceLock<Mutex<Vec<Child>>> = OnceLock::new();
 const DEFAULT_VP8_FPS: u16 = 60;
 const DEFAULT_VP8_BATCH: u16 = 120;
@@ -132,7 +146,7 @@ async fn start_one_sidecar(
         .try_clone()
         .map_err(|e| format!("clone WB Stream log: {}", e))?;
 
-    let mut command = Command::new(&joiner);
+    let mut command = silent_command(&joiner);
     let (vp8_fps, vp8_batch) = vp8_pacing_from_env();
     command.args([
         "--room",
@@ -179,7 +193,7 @@ async fn start_multipath_client(app: &tauri::AppHandle, upstream_ports: &[u16]) 
         .map_err(|e| format!("clone WB Stream multipath log: {}", e))?;
 
     let args = multipath_client_args(upstream_ports);
-    let child = Command::new(&client)
+    let child = silent_command(&client)
         .args(&args)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -356,6 +370,25 @@ fn find_bundled_or_lab_binary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Same Windows console-flash guard as singbox: every sidecar spawn must go
+    /// through `silent_command()` so it gets CREATE_NO_WINDOW. Raw constructor
+    /// must appear exactly once — inside the helper. (Needle assembled at runtime
+    /// so this test's own source does not self-match.)
+    #[test]
+    fn sidecar_spawns_go_through_silent_command_no_window() {
+        let src = include_str!("wbstream.rs");
+        let raw = ["Command", "::new("].concat();
+        let n = src.matches(raw.as_str()).count();
+        assert_eq!(
+            n, 1,
+            "every WB Stream sidecar spawn must use silent_command() for \
+             CREATE_NO_WINDOW; found {} raw constructors (expected 1, in the helper)",
+            n
+        );
+        assert!(src.contains(&["fn silent_", "command"].concat()));
+        assert!(src.contains("CREATE_NO_WINDOW"));
+    }
 
     #[test]
     fn vp8_pacing_parser_accepts_positive_u16() {
