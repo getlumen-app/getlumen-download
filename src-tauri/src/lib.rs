@@ -129,12 +129,8 @@ async fn prepare_proxy_config(key: &str) -> Result<(), String> {
                 .map_err(|e| format!("Config fetch failed: {}", e))?;
         }
         _ => {
-            let url = format!(
-                "{}/proteus-sub?sub={}&format=json-text",
-                config::config_base_url(),
-                key
-            );
-            config::fetch_and_cache(&url)
+            let urls = config::proteus_config_urls(key);
+            config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Mixed)
                 .await
                 .map_err(|e| format!("Config fetch failed: {}", e))?;
         }

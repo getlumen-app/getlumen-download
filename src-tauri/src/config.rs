@@ -38,6 +38,50 @@ pub fn config_base_url() -> String {
         .to_string()
 }
 
+const PROTEUS_CONFIG_FALLBACK_BASE: &str =
+    "https://primary-production-1d1cf.up.railway.app/webhook";
+
+pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
+    let key = sub_key.trim();
+    let primary = format!(
+        "{}/proteus-sub?sub={}&format=json-text",
+        config_base_url().trim_end_matches('/'),
+        key
+    );
+    let fallback = format!(
+        "{}/proteus-sub?sub={}&format=json-text",
+        PROTEUS_CONFIG_FALLBACK_BASE,
+        key
+    );
+    if primary == fallback {
+        vec![primary]
+    } else {
+        vec![primary, fallback]
+    }
+}
+
+pub fn redact_config_url_for_error(url: &str) -> String {
+    redact_sub_query_in_text(url)
+}
+
+pub fn redact_sub_query_in_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((before, after_marker)) = rest.split_once("sub=") {
+        out.push_str(before);
+        out.push_str("sub=<redacted>");
+        let end = after_marker
+            .find(|c| c == '&' || c == '#' || c == ')' || c == ' ')
+            .unwrap_or(after_marker.len());
+        out.push_str(&after_marker[end..]);
+        rest = "";
+    }
+    if !rest.is_empty() {
+        out.push_str(rest);
+    }
+    out
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum InboundMode {
     /// HTTP/SOCKS proxy on 127.0.0.1:10808 — runs as user, no root needed
@@ -104,6 +148,32 @@ pub async fn fetch_and_cache(url: &str) -> Result<String, Box<dyn std::error::Er
 }
 
 pub async fn fetch_and_cache_with_mode(
+    url: &str,
+    mode: InboundMode,
+) -> Result<String, Box<dyn std::error::Error>> {
+    fetch_and_cache_first_available_with_mode(&[url.to_string()], mode).await
+}
+
+pub async fn fetch_and_cache_first_available_with_mode(
+    urls: &[String],
+    mode: InboundMode,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut errors = Vec::new();
+    for url in urls {
+        match fetch_and_cache_single_with_mode(url, mode).await {
+            Ok(config) => return Ok(config),
+            Err(e) => {
+                let redacted = redact_config_url_for_error(url);
+                let redacted_error = redact_sub_query_in_text(&e.to_string());
+                log::warn!("Config fetch failed from {}: {}", redacted, redacted_error);
+                errors.push(format!("{} => {}", redacted, redacted_error));
+            }
+        }
+    }
+    Err(format!("All config endpoints failed: {}", errors.join("; ")).into())
+}
+
+async fn fetch_and_cache_single_with_mode(
     url: &str,
     mode: InboundMode,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -815,8 +885,10 @@ fn build_config_from_server(
         // exits are Reality (non-RF users with a single TCP Reality exit still
         // work as before). Server-side mirror landed in template v81.
         //
-        // interrupt_exist_connections: true ensures new requests don't inherit
-        // a stale-selected exit for 30m after urltest re-probes.
+        // Do not interrupt existing connections on URLTest switch: field
+        // reports from RF users show call/stream drops at the same cadence as
+        // probe-driven switches. Stale exits are handled by bounded probes and
+        // idle recovery, not by tearing down active flows.
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy",
@@ -825,7 +897,7 @@ fn build_config_from_server(
             "interval": "60s",
             "tolerance": 200,
             "idle_timeout": "30m",
-            "interrupt_exist_connections": true
+            "interrupt_exist_connections": false
         }));
         // Destination-specific URLTest groups — the probe URL is the actual
         // service, so an exit that can't reach it is dropped from the group.
@@ -839,7 +911,7 @@ fn build_config_from_server(
             "interval": "60s",
             "tolerance": 200,
             "idle_timeout": "30m",
-            "interrupt_exist_connections": true
+            "interrupt_exist_connections": false
         }));
         arr.push(serde_json::json!({
             "type": "urltest",
@@ -849,7 +921,7 @@ fn build_config_from_server(
             "interval": "60s",
             "tolerance": 200,
             "idle_timeout": "30m",
-            "interrupt_exist_connections": true
+            "interrupt_exist_connections": false
         }));
 
         // Server-provided proxy outbounds.
@@ -1314,13 +1386,13 @@ mod tests {
         );
     }
 
-    /// v2.3.4: all three URLTest groups must have `interrupt_exist_connections
-    /// = true` so a stale selection does not keep serving new requests after
-    /// the urltest picks a different exit. Matches server-side template v81.
-    /// Without this, @voksep's symptom reproduces on the client fallback path
-    /// (build_config_from_server) even when server sends only outbounds.
+    /// v2.5.2: URLTest groups must not force-teardown active flows on probe
+    /// switches. Field reports from RF users map to the 15-30s/60s probe
+    /// cadence: sessions work briefly, then calls/streams reconnect. Stale
+    /// exit recovery must be handled by bounded probes/idle recovery, not by
+    /// killing every active flow on each selected-outbound change.
     #[test]
-    fn urltest_groups_interrupt_existing_connections_on_switch() {
+    fn urltest_groups_do_not_interrupt_existing_connections_on_switch() {
         let raw = "vless://00000000-0000-4000-8000-000000000008@192.0.2.80:443?type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&sni=google.com&sid=deadbeef&spx=%2F&flow=xtls-rprx-vision#u";
         let v = crate::vless::parse_vless(raw).expect("parse");
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
@@ -1333,13 +1405,41 @@ mod tests {
             assert_eq!(
                 ut.get("interrupt_exist_connections")
                     .and_then(|v| v.as_bool()),
-                Some(true),
-                "urltest group {:?} must have interrupt_exist_connections=true \
-                 (stale exits otherwise serve new requests for 30m after probe \
-                 switches selection). @voksep 2026-04-22, server mirror v81.",
+                Some(false),
+                "urltest group {:?} must not interrupt active connections on \
+                 probe-driven switches; this can kill calls/streams at the \
+                 same cadence as URLTest probes.",
                 tag
             );
         }
+    }
+
+    #[test]
+    fn proteus_config_urls_include_backend_fallback() {
+        let urls = proteus_config_urls("test-sub-key");
+        assert_eq!(urls.len(), 2);
+        assert_eq!(
+            urls[0],
+            "https://config.getlumen.download/proteus-sub?sub=test-sub-key&format=json-text"
+        );
+        assert_eq!(
+            urls[1],
+            "https://primary-production-1d1cf.up.railway.app/webhook/proteus-sub?sub=test-sub-key&format=json-text"
+        );
+    }
+
+    #[test]
+    fn config_url_errors_redact_sub_key() {
+        let url = "https://config.getlumen.download/proteus-sub?sub=test-sub-key&format=json-text";
+        assert_eq!(
+            redact_config_url_for_error(url),
+            "https://config.getlumen.download/proteus-sub?sub=<redacted>&format=json-text"
+        );
+        let err = "error sending request for url (https://config.getlumen.download/proteus-sub?sub=test-sub-key&format=json-text)";
+        assert_eq!(
+            redact_sub_query_in_text(err),
+            "error sending request for url (https://config.getlumen.download/proteus-sub?sub=<redacted>&format=json-text)"
+        );
     }
 
     /// v2.3.4: a Google/YouTube IP-CIDR rule must be present in route.rules

@@ -108,16 +108,12 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
             .await
             .map_err(|e| format!("Config build failed: {}", e))?;
     } else {
-        let url = if s.starts_with("https://") || s.starts_with("http://") {
-            s.to_string()
+        let urls = if s.starts_with("https://") || s.starts_with("http://") {
+            vec![s.to_string()]
         } else {
-            format!(
-                "{}/proteus-sub?sub={}&format=json-text",
-                config::config_base_url(),
-                s
-            )
+            config::proteus_config_urls(s)
         };
-        match config::fetch_and_cache_with_mode(&url, config::InboundMode::Tun).await {
+        match config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Tun).await {
             Ok(_) => {
                 // Server fetch = full multi-exit config. Preserve an immutable
                 // last-good copy so a later single-`vless://` connect (which
