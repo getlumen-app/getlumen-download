@@ -105,6 +105,19 @@ MOUNT_POINT="$(printf '%s\n' "$mount_output" | awk '/\\/Volumes\\// {print $NF; 
 
 log "Installing to $INSTALL_DIR/$APP_NAME.app"
 osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+killall "$APP_NAME" >/dev/null 2>&1 || true
+killall sing-box >/dev/null 2>&1 || true
+
+log "Removing old helper, caches, and stale runtime files"
+if [ -f /Library/LaunchDaemons/io.getlumen.helper.plist ] || [ -f /Library/PrivilegedHelperTools/io.getlumen.helper ]; then
+  sudo launchctl bootout system/io.getlumen.helper >/dev/null 2>&1 || true
+  sudo rm -f /Library/LaunchDaemons/io.getlumen.helper.plist
+  sudo rm -f /Library/PrivilegedHelperTools/io.getlumen.helper
+fi
+
+rm -rf "$HOME/Library/Caches/io.getlumen.app"
+rm -rf "$HOME/Library/HTTPStorages/io.getlumen.app"
+rm -rf "$HOME/Library/Saved Application State/io.getlumen.app.savedState"
 
 if [ -d "$INSTALL_DIR/$APP_NAME.app" ]; then
   rm -rf "$INSTALL_DIR/$APP_NAME.app"

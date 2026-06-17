@@ -40,6 +40,7 @@ pub fn config_base_url() -> String {
 
 const PROTEUS_CONFIG_FALLBACK_BASE: &str =
     "https://primary-production-1d1cf.up.railway.app/webhook";
+const PROTEUS_CONFIG_CF_WORKER_FALLBACK_BASE: &str = "https://sub.hwai-ops.xyz";
 
 pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
     let key = sub_key.trim();
@@ -53,11 +54,14 @@ pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
         PROTEUS_CONFIG_FALLBACK_BASE,
         key
     );
-    if primary == fallback {
-        vec![primary]
-    } else {
-        vec![primary, fallback]
-    }
+    let cf_worker_fallback = format!(
+        "{}/proteus-sub?sub={}&format=json-text",
+        PROTEUS_CONFIG_CF_WORKER_FALLBACK_BASE,
+        key
+    );
+    let mut urls = vec![primary, fallback, cf_worker_fallback];
+    urls.dedup();
+    urls
 }
 
 pub fn redact_config_url_for_error(url: &str) -> String {
@@ -1417,7 +1421,7 @@ mod tests {
     #[test]
     fn proteus_config_urls_include_backend_fallback() {
         let urls = proteus_config_urls("test-sub-key");
-        assert_eq!(urls.len(), 2);
+        assert_eq!(urls.len(), 3);
         assert_eq!(
             urls[0],
             "https://config.getlumen.download/proteus-sub?sub=test-sub-key&format=json-text"
@@ -1425,6 +1429,10 @@ mod tests {
         assert_eq!(
             urls[1],
             "https://primary-production-1d1cf.up.railway.app/webhook/proteus-sub?sub=test-sub-key&format=json-text"
+        );
+        assert_eq!(
+            urls[2],
+            "https://sub.hwai-ops.xyz/proteus-sub?sub=test-sub-key&format=json-text"
         );
     }
 
