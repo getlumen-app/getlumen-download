@@ -17,6 +17,16 @@ function response(body, init = {}) {
 
 const goodFetch = async (url, init = {}) => {
   const u = String(url);
+  const goodInstaller = [
+    'REPO="getlumen-app/getlumen-download"',
+    "--dry-run",
+    "Dry run complete. No files were installed.",
+    'killall "$APP_NAME"',
+    "Removing old helper, caches, and stale runtime files",
+    "/Library/PrivilegedHelperTools/io.getlumen.helper",
+    "$HOME/Library/Caches/io.getlumen.app",
+  ].join("\n");
+
   if (u === "https://api.github.com/repos/getlumen-app/getlumen-download/releases/latest") {
     return response({
       tag_name: "v2.4.0",
@@ -39,10 +49,10 @@ const goodFetch = async (url, init = {}) => {
     });
   }
   if (u === "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/install.sh") {
-    return response('REPO="getlumen-app/getlumen-download"\n--dry-run\nDry run complete. No files were installed.');
+    return response(goodInstaller);
   }
   if (u === "https://getlumen.download/install") {
-    return response('REPO="getlumen-app/getlumen-download"\n--dry-run\nDry run complete. No files were installed.');
+    return response(goodInstaller);
   }
   if (u === "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/Lumen_2.4.0_aarch64.dmg") {
     assert.equal(init.method, "HEAD");

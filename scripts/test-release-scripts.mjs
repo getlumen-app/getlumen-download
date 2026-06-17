@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const scripts = pkg.scripts || {};
 const installer = await readFile(new URL("../install.sh", import.meta.url), "utf8");
+const indexHtml = await readFile(new URL("../index.html", import.meta.url), "utf8");
 
 assert.ok(scripts["release:verify"], "package.json must expose release:verify");
 assert.match(
@@ -31,6 +32,14 @@ for (const required of [
   "$HOME/Library/Caches/io.getlumen.app",
 ]) {
   assert.match(installer, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `install.sh must hard-clean ${required}`);
+}
+
+for (const blockedHost of ["fonts.googleapis.com", "fonts.gstatic.com"]) {
+  assert.doesNotMatch(
+    indexHtml,
+    new RegExp(blockedHost.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    `index.html must not block first paint on external ${blockedHost} fonts`,
+  );
 }
 
 console.log("release script tests passed");
