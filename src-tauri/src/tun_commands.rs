@@ -113,7 +113,9 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
         } else {
             config::proteus_config_urls(s)
         };
-        match config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Tun).await {
+        match config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Tun)
+            .await
+        {
             Ok(_) => {
                 // Server fetch = full multi-exit config. Preserve an immutable
                 // last-good copy so a later single-`vless://` connect (which
@@ -131,7 +133,10 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
                 match config::load_cached_tun_config() {
                     Ok(cached) => {
                         std::fs::write(config::tun_config_file_path(), &cached).map_err(|e| {
-                            format!("Config fetch failed: {}; cache write failed: {}", fetch_err, e)
+                            format!(
+                                "Config fetch failed: {}; cache write failed: {}",
+                                fetch_err, e
+                            )
                         })?;
                         log::warn!(
                             "Config fetch failed ({}); connecting from last-good cached config",

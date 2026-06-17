@@ -8,9 +8,9 @@ mod tun_commands;
 #[cfg(target_os = "macos")]
 mod tun_helper;
 mod vless;
-pub mod wbstream_accounts;
 #[cfg(target_os = "macos")]
 mod wbstream;
+pub mod wbstream_accounts;
 #[cfg(target_os = "macos")]
 mod wbstream_balancer;
 pub mod wbstream_multipath;
@@ -130,9 +130,27 @@ async fn prepare_proxy_config(key: &str) -> Result<(), String> {
         }
         _ => {
             let urls = config::proteus_config_urls(key);
-            config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Mixed)
-                .await
-                .map_err(|e| format!("Config fetch failed: {}", e))?;
+            if let Err(fetch_err) =
+                config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Mixed)
+                    .await
+            {
+                let cached = config::load_cached_proxy_config().map_err(|cache_err| {
+                    format!(
+                        "Config fetch failed: {} (no usable cached proxy config: {})",
+                        fetch_err, cache_err
+                    )
+                })?;
+                std::fs::write(config::config_file_path(), &cached).map_err(|write_err| {
+                    format!(
+                        "Config fetch failed: {}; cached proxy config write failed: {}",
+                        fetch_err, write_err
+                    )
+                })?;
+                log::warn!(
+                    "Config fetch failed ({}); connecting from cached proxy config",
+                    fetch_err
+                );
+            }
         }
     }
     Ok(())
@@ -350,11 +368,7 @@ async fn fetch_external_ip_snapshot() -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(4))
-        .user_agent(concat!(
-            "Lumen/",
-            env!("CARGO_PKG_VERSION"),
-            " diagnostics"
-        ))
+        .user_agent(concat!("Lumen/", env!("CARGO_PKG_VERSION"), " diagnostics"))
         .build()
         .map_err(|e| format!("diagnostics client: {}", e))?;
 

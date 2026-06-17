@@ -193,11 +193,16 @@ impl WbAccountProvider for FakeWbAccountProvider {
     }
 
     fn account_status(&self, alias: &str) -> Option<AccountStatus> {
-        self.accounts.get(alias).map(|account| account.status.clone())
+        self.accounts
+            .get(alias)
+            .map(|account| account.status.clone())
     }
 
     fn refresh_session(&mut self, alias: &str) -> Result<(), ProviderError> {
-        let account = self.accounts.get_mut(alias).ok_or(ProviderError::Disabled)?;
+        let account = self
+            .accounts
+            .get_mut(alias)
+            .ok_or(ProviderError::Disabled)?;
         account.refresh_count += 1;
         if account.refreshable {
             account.status = AccountStatus::Healthy;
@@ -209,7 +214,10 @@ impl WbAccountProvider for FakeWbAccountProvider {
     }
 
     fn create_room(&mut self, alias: &str) -> Result<RoomLease, ProviderError> {
-        let account = self.accounts.get_mut(alias).ok_or(ProviderError::Disabled)?;
+        let account = self
+            .accounts
+            .get_mut(alias)
+            .ok_or(ProviderError::Disabled)?;
         if let Some(error) = account.create_room_error.clone() {
             return Err(error);
         }

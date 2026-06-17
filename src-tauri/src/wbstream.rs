@@ -58,15 +58,13 @@ pub fn fallback_status(app: &tauri::AppHandle) -> WbstreamFallbackStatus {
         sidecar_count,
         balancer_running: balancer.running,
         balancer_upstream_count: balancer.upstream_count,
-        local_socks_port: balancer
-            .listen_port
-            .unwrap_or_else(|| {
-                if sidecar_count > config::WBSTREAM_MAX_ROOMS {
-                    config::WBSTREAM_LOCAL_MULTIPATH_PORT
-                } else {
-                    config::WBSTREAM_LOCAL_SOCKS_PORT
-                }
-            }),
+        local_socks_port: balancer.listen_port.unwrap_or_else(|| {
+            if sidecar_count > config::WBSTREAM_MAX_ROOMS {
+                config::WBSTREAM_LOCAL_MULTIPATH_PORT
+            } else {
+                config::WBSTREAM_LOCAL_SOCKS_PORT
+            }
+        }),
         joiner_path: find_joiner(app)
             .ok()
             .map(|p| p.to_string_lossy().to_string()),
@@ -179,7 +177,10 @@ async fn start_one_sidecar(
     wait_for_sidecar_ready(&log_path, socks_port, Duration::from_secs(30)).await
 }
 
-async fn start_multipath_client(app: &tauri::AppHandle, upstream_ports: &[u16]) -> Result<u16, String> {
+async fn start_multipath_client(
+    app: &tauri::AppHandle,
+    upstream_ports: &[u16],
+) -> Result<u16, String> {
     let client = find_multipath_client(app)?;
     let log_path = config::data_dir().join("wbstream-multipath-client.log");
     let stdout = std::fs::OpenOptions::new()
@@ -198,14 +199,24 @@ async fn start_multipath_client(app: &tauri::AppHandle, upstream_ports: &[u16]) 
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|e| format!("start WB Stream multipath client {}: {}", client.display(), e))?;
+        .map_err(|e| {
+            format!(
+                "start WB Stream multipath client {}: {}",
+                client.display(),
+                e
+            )
+        })?;
 
     {
         let mut slot = sidecars_slot().lock().unwrap();
         slot.push(child);
     }
 
-    wait_for_port_ready(config::WBSTREAM_LOCAL_MULTIPATH_PORT, Duration::from_secs(5)).await?;
+    wait_for_port_ready(
+        config::WBSTREAM_LOCAL_MULTIPATH_PORT,
+        Duration::from_secs(5),
+    )
+    .await?;
     Ok(config::WBSTREAM_LOCAL_MULTIPATH_PORT)
 }
 
@@ -319,7 +330,7 @@ fn find_joiner(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         "headless-wbstream-joiner",
         "/opt/getlumen/wbstream/headless-wbstream-joiner",
     )
-        .ok_or_else(|| "headless-wbstream-joiner is not bundled".to_string())
+    .ok_or_else(|| "headless-wbstream-joiner is not bundled".to_string())
 }
 
 fn find_multipath_client(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -328,7 +339,7 @@ fn find_multipath_client(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         platform_binary_name("wbstream_multipath_client"),
         "/opt/getlumen/wbstream/wbstream_multipath_client",
     )
-        .ok_or_else(|| "wbstream_multipath_client is not bundled".to_string())
+    .ok_or_else(|| "wbstream_multipath_client is not bundled".to_string())
 }
 
 fn platform_binary_name(base: &'static str) -> &'static str {
@@ -350,21 +361,13 @@ fn find_bundled_or_lab_binary(
     bin_name: &str,
     fallback_path: &str,
 ) -> Option<PathBuf> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .ok()?;
+    let resource_dir = app.path().resource_dir().ok()?;
     let candidates = [
-        resource_dir
-            .join("_up_")
-            .join("bin")
-            .join(bin_name),
+        resource_dir.join("_up_").join("bin").join(bin_name),
         resource_dir.join(bin_name),
         PathBuf::from(fallback_path),
     ];
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
+    candidates.into_iter().find(|path| path.exists())
 }
 
 #[cfg(test)]

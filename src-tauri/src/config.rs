@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
+
+type ConfigError = Box<dyn std::error::Error + Send + Sync>;
 
 pub fn config_file_path() -> PathBuf {
     data_dir().join("config.json")
@@ -42,6 +44,17 @@ const PROTEUS_CONFIG_FALLBACK_BASE: &str =
     "https://primary-production-1d1cf.up.railway.app/webhook";
 const PROTEUS_CONFIG_CF_WORKER_FALLBACK_BASE: &str = "https://sub.hwai-ops.xyz";
 
+const CONFIG_DNS_PINS: &[(&str, &[&str])] = &[
+    (
+        "config.getlumen.download",
+        &["104.21.75.98:443", "172.67.220.94:443"],
+    ),
+    (
+        "sub.hwai-ops.xyz",
+        &["172.67.206.71:443", "104.21.69.74:443"],
+    ),
+];
+
 pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
     let key = sub_key.trim();
     let primary = format!(
@@ -51,13 +64,11 @@ pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
     );
     let fallback = format!(
         "{}/proteus-sub?sub={}&format=json-text",
-        PROTEUS_CONFIG_FALLBACK_BASE,
-        key
+        PROTEUS_CONFIG_FALLBACK_BASE, key
     );
     let cf_worker_fallback = format!(
         "{}/proteus-sub?sub={}&format=json-text",
-        PROTEUS_CONFIG_CF_WORKER_FALLBACK_BASE,
-        key
+        PROTEUS_CONFIG_CF_WORKER_FALLBACK_BASE, key
     );
     let mut urls = vec![primary, fallback, cf_worker_fallback];
     urls.dedup();
@@ -109,19 +120,23 @@ pub fn tun_config_lastgood_path() -> PathBuf {
 /// Prefers the immutable last-good copy, then the active config. Validates that
 /// outbounds exist so sing-box never starts on garbage. No secrets: this only
 /// ever returns the user's own previously-fetched config.
-pub fn load_cached_tun_config() -> Result<String, Box<dyn std::error::Error>> {
+pub fn load_cached_tun_config() -> Result<String, ConfigError> {
     let lastgood = tun_config_lastgood_path();
     if lastgood.exists() {
-        if let Ok(s) = load_cached_tun_config_from(&lastgood) {
+        if let Ok(s) = load_cached_config_for_mode_from(&lastgood) {
             return Ok(s);
         }
     }
-    load_cached_tun_config_from(&tun_config_file_path())
+    load_cached_config_for_mode_from(&tun_config_file_path())
 }
 
-fn load_cached_tun_config_from(
-    path: &std::path::Path,
-) -> Result<String, Box<dyn std::error::Error>> {
+/// Load a previously fetched proxy-mode config for censored control-plane
+/// fallback. This is intentionally only used after all Proteus endpoints fail.
+pub fn load_cached_proxy_config() -> Result<String, ConfigError> {
+    load_cached_config_for_mode_from(&config_file_path())
+}
+
+fn load_cached_config_for_mode_from(path: &std::path::Path) -> Result<String, ConfigError> {
     let body = std::fs::read_to_string(path)?;
     let v: serde_json::Value = serde_json::from_str(&body)?;
     let has_outbounds = v
@@ -130,7 +145,7 @@ fn load_cached_tun_config_from(
         .map(|a| !a.is_empty())
         .unwrap_or(false);
     if !has_outbounds {
-        return Err("cached TUN config has no outbounds".into());
+        return Err("cached config has no outbounds".into());
     }
     Ok(body)
 }
@@ -147,21 +162,21 @@ pub const WBSTREAM_MAX_ROOMS: usize = 3;
 
 /// Fetch config from server, generate working config, cache to disk.
 /// Server returns outbounds (proxies). Client wraps them with DNS, routing, inbounds.
-pub async fn fetch_and_cache(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub async fn fetch_and_cache(url: &str) -> Result<String, ConfigError> {
     fetch_and_cache_with_mode(url, InboundMode::Mixed).await
 }
 
 pub async fn fetch_and_cache_with_mode(
     url: &str,
     mode: InboundMode,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ConfigError> {
     fetch_and_cache_first_available_with_mode(&[url.to_string()], mode).await
 }
 
 pub async fn fetch_and_cache_first_available_with_mode(
     urls: &[String],
     mode: InboundMode,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ConfigError> {
     let mut errors = Vec::new();
     for url in urls {
         match fetch_and_cache_single_with_mode(url, mode).await {
@@ -180,15 +195,35 @@ pub async fn fetch_and_cache_first_available_with_mode(
 async fn fetch_and_cache_single_with_mode(
     url: &str,
     mode: InboundMode,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        // User-Agent reflects the installed binary's version automatically at
-        // compile time. Must never be hard-coded — it drifts and logs become
-        // useless. `env!("CARGO_PKG_VERSION")` pulls from Cargo.toml.
-        .user_agent(concat!("Lumen/", env!("CARGO_PKG_VERSION"), " sing-box"))
-        .timeout(std::time::Duration::from_secs(15))
-        .no_proxy()
-        .build()?;
+) -> Result<String, ConfigError> {
+    match fetch_config_body(url, false).await {
+        Ok(body) => parse_and_cache_config_body(&body, mode).await,
+        Err(first_err) => {
+            let first_error = first_err.to_string();
+            drop(first_err);
+            if config_url_supports_dns_pins(url) {
+                log::warn!(
+                    "Config fetch failed before response; retrying with pinned DNS for {}: {}",
+                    redact_config_url_for_error(url),
+                    redact_sub_query_in_text(&first_error)
+                );
+                let body = fetch_config_body(url, true).await.map_err(|pinned_err| {
+                    format!(
+                        "{}; pinned DNS retry failed: {}",
+                        first_error,
+                        redact_sub_query_in_text(&pinned_err.to_string())
+                    )
+                })?;
+                parse_and_cache_config_body(&body, mode).await
+            } else {
+                Err(first_error.into())
+            }
+        }
+    }
+}
+
+async fn fetch_config_body(url: &str, pinned_dns: bool) -> Result<String, ConfigError> {
+    let client = config_http_client(pinned_dns)?;
 
     log::info!("Fetching config from: {}", url);
     let mut resp = client.get(url).send().await?;
@@ -212,7 +247,36 @@ async fn fetch_and_cache_single_with_mode(
         return Err(format!("Config server returned {}", resp.status()).into());
     }
 
-    let body = resp.text().await?;
+    Ok(resp.text().await?)
+}
+
+fn config_http_client(pinned_dns: bool) -> Result<reqwest::Client, ConfigError> {
+    let mut builder = reqwest::Client::builder()
+        // User-Agent reflects the installed binary's version automatically at
+        // compile time. Must never be hard-coded — it drifts and logs become
+        // useless. `env!("CARGO_PKG_VERSION")` pulls from Cargo.toml.
+        .user_agent(concat!("Lumen/", env!("CARGO_PKG_VERSION"), " sing-box"))
+        .timeout(std::time::Duration::from_secs(15))
+        .no_proxy();
+
+    if pinned_dns {
+        for (host, addrs) in CONFIG_DNS_PINS {
+            let parsed: Vec<SocketAddr> = addrs
+                .iter()
+                .filter_map(|addr| addr.parse::<SocketAddr>().ok())
+                .collect();
+            builder = builder.resolve_to_addrs(host, &parsed);
+        }
+    }
+
+    Ok(builder.build()?)
+}
+
+fn config_url_supports_dns_pins(url: &str) -> bool {
+    CONFIG_DNS_PINS.iter().any(|(host, _)| url.contains(host))
+}
+
+async fn parse_and_cache_config_body(body: &str, mode: InboundMode) -> Result<String, ConfigError> {
     let mut server_config: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("Invalid config JSON: {}", e))?;
     cache_wbstream_manifest_from_server(&server_config);
@@ -315,7 +379,7 @@ pub async fn prefetch_wbstream_manifest_sidecar() -> Result<(), String> {
             let path = wbstream_manifest_file_path();
             let body = serde_json::to_string_pretty(&manifest)?;
             std::fs::write(&path, body)?;
-            Ok::<_, Box<dyn std::error::Error>>(())
+            Ok::<_, ConfigError>(())
         }
         .await;
 
@@ -367,7 +431,7 @@ fn strip_client_side_metadata(config: &mut serde_json::Value) {
     }
 }
 
-pub fn load_cached_wbstream_manifest() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+pub fn load_cached_wbstream_manifest() -> Result<serde_json::Value, ConfigError> {
     let path = wbstream_manifest_file_path();
     let body = std::fs::read_to_string(&path)?;
     let manifest: serde_json::Value = serde_json::from_str(&body)?;
@@ -415,7 +479,7 @@ pub fn select_wbstream_room_urls(manifest: &serde_json::Value, limit: usize) -> 
 pub fn save_wbstream_fallback_config(
     mode: InboundMode,
     local_socks_port: u16,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ConfigError> {
     let cfg = build_wbstream_fallback_config(mode, local_socks_port);
     let final_json = serde_json::to_string_pretty(&cfg)?;
     let path = match mode {
@@ -520,9 +584,8 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
     })
 }
 
-const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] = &[
-    "https://config.getlumen.download/wbstream-manifest.json",
-];
+const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] =
+    &["https://config.getlumen.download/wbstream-manifest.json"];
 
 /// Build a single-outbound sing-box config from a parsed VLESS link.
 /// Used when user supplies a raw vless:// URI instead of a Proteus subscription.
@@ -535,7 +598,7 @@ const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] = &[
 pub fn build_config_from_vless(
     vless: &crate::vless::VlessConfig,
     mode: InboundMode,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<serde_json::Value, ConfigError> {
     let tag = vless_outbound_tag(&vless.name);
     let outbound = crate::vless::to_singbox_outbound(vless, &tag);
     // Wrap as a "server response" with single outbound and reuse the existing builder
@@ -592,7 +655,7 @@ fn vless_outbound_tag(raw_name: &str) -> String {
 pub async fn save_vless_config(
     vless: &crate::vless::VlessConfig,
     mode: InboundMode,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ConfigError> {
     let cfg = build_config_from_vless(vless, mode)?;
     let final_json = serde_json::to_string_pretty(&cfg)?;
     let path = match mode {
@@ -610,7 +673,7 @@ pub async fn save_vless_config(
 fn build_config_from_server(
     server: &serde_json::Value,
     mode: InboundMode,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<serde_json::Value, ConfigError> {
     let outbounds = server
         .get("outbounds")
         .and_then(|o| o.as_array())
@@ -950,7 +1013,7 @@ fn build_config_from_server(
     Ok(config)
 }
 
-pub fn _load_cached() -> Result<String, Box<dyn std::error::Error>> {
+pub fn _load_cached() -> Result<String, ConfigError> {
     let path = config_file_path();
     if !path.exists() {
         return Err("No cached config found".into());
@@ -1450,6 +1513,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_dns_pins_cover_cf_control_plane_hosts() {
+        assert!(config_url_supports_dns_pins(
+            "https://config.getlumen.download/proteus-sub?sub=x"
+        ));
+        assert!(config_url_supports_dns_pins(
+            "https://sub.hwai-ops.xyz/proteus-sub?sub=x"
+        ));
+        assert!(!config_url_supports_dns_pins(
+            "https://primary-production-1d1cf.up.railway.app/webhook/proteus-sub?sub=x"
+        ));
+    }
+
     /// v2.3.4: a Google/YouTube IP-CIDR rule must be present in route.rules
     /// to catch QUIC UDP 443 to googlevideo.com when sniff misses SNI. Chrome
     /// caches `alt-svc: h3=:443` after first HTTP/2 response and switches to
@@ -1665,23 +1741,60 @@ mod cache_fallback_tests {
 
         let good = dir.join("good.json");
         std::fs::write(&good, r#"{"outbounds":[{"type":"vless","tag":"x"}]}"#).unwrap();
-        assert!(load_cached_tun_config_from(&good).is_ok(), "valid config with outbounds must load");
+        assert!(
+            load_cached_config_for_mode_from(&good).is_ok(),
+            "valid config with outbounds must load"
+        );
 
         let empty = dir.join("empty.json");
         std::fs::write(&empty, r#"{"outbounds":[]}"#).unwrap();
-        assert!(load_cached_tun_config_from(&empty).is_err(), "empty outbounds must be rejected");
+        assert!(
+            load_cached_config_for_mode_from(&empty).is_err(),
+            "empty outbounds must be rejected"
+        );
 
         let garbage = dir.join("garbage.json");
         std::fs::write(&garbage, "not json").unwrap();
-        assert!(load_cached_tun_config_from(&garbage).is_err(), "invalid json must be rejected");
+        assert!(
+            load_cached_config_for_mode_from(&garbage).is_err(),
+            "invalid json must be rejected"
+        );
 
         let missing = dir.join("missing.json");
-        assert!(load_cached_tun_config_from(&missing).is_err(), "missing file must be rejected");
+        assert!(
+            load_cached_config_for_mode_from(&missing).is_err(),
+            "missing file must be rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cached_config_for_mode_from_validates_proxy_cache() {
+        let dir = std::env::temp_dir().join(format!("lumen-proxy-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let good = dir.join("proxy-good.json");
+        std::fs::write(
+            &good,
+            r#"{"outbounds":[{"type":"vless","tag":"proxy-auto"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            load_cached_config_for_mode_from(&good).is_ok(),
+            "proxy mode must be able to reuse a valid cached config when control-plane endpoints are blocked"
+        );
+
+        let empty = dir.join("proxy-empty.json");
+        std::fs::write(&empty, r#"{"outbounds":[]}"#).unwrap();
+        assert!(
+            load_cached_config_for_mode_from(&empty).is_err(),
+            "empty proxy cache must be rejected"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
 
 // ---- P1a: bootstrap-over-own-cached-exit (L2) — pure helpers ----------------
 // When the config endpoint is blocked, we fetch a fresh config THROUGH one of
@@ -1756,7 +1869,10 @@ mod bootstrap_tests {
             {"type":"direct","tag":"direct"}
         ]});
         let e = extract_bootstrap_exit(&cfg).expect("should find a direct reality exit");
-        assert_eq!(e.get("tag").and_then(|t| t.as_str()), Some("netcup-tcp-reality"));
+        assert_eq!(
+            e.get("tag").and_then(|t| t.as_str()),
+            Some("netcup-tcp-reality")
+        );
     }
 
     #[test]
@@ -1764,7 +1880,10 @@ mod bootstrap_tests {
         let cfg = serde_json::json!({"outbounds": [
             {"type":"vless","tag":"relay-eu-1","tls":{"reality":{}},"transport":{"type":"grpc"}}
         ]});
-        assert!(extract_bootstrap_exit(&cfg).is_some(), "any reality exit is acceptable fallback");
+        assert!(
+            extract_bootstrap_exit(&cfg).is_some(),
+            "any reality exit is acceptable fallback"
+        );
     }
 
     #[test]
