@@ -68,7 +68,11 @@ function installerBodyOk(body) {
   return (
     body.includes(`REPO="${REPO}"`) &&
     body.includes("--dry-run") &&
-    body.includes("Dry run complete. No files were installed.")
+    body.includes("Dry run complete. No files were installed.") &&
+    body.includes('killall "$APP_NAME"') &&
+    body.includes("Removing old helper, caches, and stale runtime files") &&
+    body.includes("/Library/PrivilegedHelperTools/io.getlumen.helper") &&
+    body.includes("$HOME/Library/Caches/io.getlumen.app")
   );
 }
 
@@ -153,8 +157,8 @@ async function checkInstaller({ id, label, url, fetchImpl, timeoutMs }) {
   try {
     const { response, body } = await fetchText(fetchImpl, url, timeoutMs);
     if (!response.ok) return fail(id, label, `HTTP ${response.status}`, { http: response.status, url });
-    if (!installerBodyOk(body)) return fail(id, label, "installer body is missing required dry-run markers", { http: response.status, url });
-    return pass(id, label, "installer body has safe dry-run markers", { http: response.status, url });
+    if (!installerBodyOk(body)) return fail(id, label, "installer body is missing required dry-run or hard-clean markers", { http: response.status, url });
+    return pass(id, label, "installer body has safe dry-run and hard-clean markers", { http: response.status, url });
   } catch (error) {
     return fail(id, label, error.message, { http: null, url });
   }
