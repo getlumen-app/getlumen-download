@@ -50,6 +50,28 @@ export interface NetworkDiagnostics {
   error: string | null;
 }
 
+export interface BootstrapImportResult {
+  id: string;
+  name: string;
+  key_type: "vless";
+  value: string;
+  preferred_mode: "proxy" | "tun";
+  full_config_url?: string | null;
+}
+
+export async function importBootstrapPayload(payload: string): Promise<BootstrapImportResult> {
+  if (!IS_TAURI) {
+    return {
+      id: "bootstrap-imported",
+      name: "Bootstrap profile",
+      key_type: "vless",
+      value: payload,
+      preferred_mode: "proxy",
+    };
+  }
+  return invoke<BootstrapImportResult>("import_bootstrap_payload", { payload });
+}
+
 export async function repairNetwork(): Promise<RepairNetworkResult> {
   if (!IS_TAURI) {
     return {

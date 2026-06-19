@@ -226,6 +226,26 @@
   color: var(--fg-muted);
 }
 
+.settings__bootstrap-input {
+  width: 100%;
+  min-height: 74px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.settings__bootstrap-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .settings__copy-status {
   margin-top: 8px;
   font-size: var(--fs-sm);
