@@ -6,6 +6,10 @@ pub fn config_file_path() -> PathBuf {
     data_dir().join("config.json")
 }
 
+pub fn bootstrap_full_config_url_path() -> PathBuf {
+    data_dir().join("bootstrap-full-config-url.txt")
+}
+
 pub fn data_dir() -> PathBuf {
     let dir = platform_data_dir().join("io.getlumen.app");
     std::fs::create_dir_all(&dir).ok();
@@ -136,6 +140,32 @@ pub fn load_cached_proxy_config() -> Result<String, ConfigError> {
     load_cached_config_for_mode_from(&config_file_path())
 }
 
+pub fn save_bootstrap_full_config_url(url: Option<&str>) -> Result<(), ConfigError> {
+    let path = bootstrap_full_config_url_path();
+    match url.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(url) => {
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err("bootstrap full config URL must be http(s)".into());
+            }
+            std::fs::write(path, url)?;
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+
+pub fn load_bootstrap_full_config_url() -> Option<String> {
+    let url = std::fs::read_to_string(bootstrap_full_config_url_path()).ok()?;
+    let url = url.trim().to_string();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Some(url)
+    } else {
+        None
+    }
+}
+
 fn load_cached_config_for_mode_from(path: &std::path::Path) -> Result<String, ConfigError> {
     let body = std::fs::read_to_string(path)?;
     let v: serde_json::Value = serde_json::from_str(&body)?;
@@ -192,6 +222,34 @@ pub async fn fetch_and_cache_first_available_with_mode(
     Err(format!("All config endpoints failed: {}", errors.join("; ")).into())
 }
 
+pub async fn fetch_and_cache_first_available_with_mode_via_proxy(
+    urls: &[String],
+    mode: InboundMode,
+    proxy_url: &str,
+) -> Result<String, ConfigError> {
+    let mut errors = Vec::new();
+    for url in urls {
+        match fetch_config_body_via_proxy(url, proxy_url).await {
+            Ok(body) => return parse_and_cache_config_body(&body, mode).await,
+            Err(e) => {
+                let redacted = redact_config_url_for_error(url);
+                let redacted_error = redact_sub_query_in_text(&e.to_string());
+                log::warn!(
+                    "Config fetch via proxy failed from {}: {}",
+                    redacted,
+                    redacted_error
+                );
+                errors.push(format!("{} => {}", redacted, redacted_error));
+            }
+        }
+    }
+    Err(format!(
+        "All proxied config endpoints failed: {}",
+        errors.join("; ")
+    )
+    .into())
+}
+
 async fn fetch_and_cache_single_with_mode(
     url: &str,
     mode: InboundMode,
@@ -224,7 +282,18 @@ async fn fetch_and_cache_single_with_mode(
 
 async fn fetch_config_body(url: &str, pinned_dns: bool) -> Result<String, ConfigError> {
     let client = config_http_client(pinned_dns)?;
+    fetch_config_body_with_client(url, client).await
+}
 
+async fn fetch_config_body_via_proxy(url: &str, proxy_url: &str) -> Result<String, ConfigError> {
+    let client = config_http_client_via_proxy(proxy_url)?;
+    fetch_config_body_with_client(url, client).await
+}
+
+async fn fetch_config_body_with_client(
+    url: &str,
+    client: reqwest::Client,
+) -> Result<String, ConfigError> {
     log::info!("Fetching config from: {}", url);
     let mut resp = client.get(url).send().await?;
     log::info!("Config response: {} (url={})", resp.status(), url);
@@ -270,6 +339,14 @@ fn config_http_client(pinned_dns: bool) -> Result<reqwest::Client, ConfigError> 
     }
 
     Ok(builder.build()?)
+}
+
+fn config_http_client_via_proxy(proxy_url: &str) -> Result<reqwest::Client, ConfigError> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("Lumen/", env!("CARGO_PKG_VERSION"), " sing-box"))
+        .timeout(std::time::Duration::from_secs(20))
+        .proxy(reqwest::Proxy::all(proxy_url)?)
+        .build()?)
 }
 
 fn config_url_supports_dns_pins(url: &str) -> bool {

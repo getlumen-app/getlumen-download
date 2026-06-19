@@ -354,6 +354,14 @@ export default function App() {
     setTab("home");
   }
 
+  async function handleBootstrapImport(payload: string) {
+    const profile = await tauri.importBootstrapPayload(payload);
+    keyStore.replaceWithKey(profile.value, profile.name);
+    localStorage.setItem("lumen-vpn-mode", profile.preferred_mode);
+    localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
+    setTab("home");
+  }
+
   async function handleSelectProxy(groupName: string, nodeName: string) {
     try {
       await tauri.selectProxy(groupName, nodeName);
@@ -377,7 +385,7 @@ export default function App() {
   }
 
   if (!accessKey) {
-    return <KeyInput onSubmit={handleSaveKey} />;
+    return <KeyInput onSubmit={handleSaveKey} onBootstrapImport={handleBootstrapImport} />;
   }
 
   return (

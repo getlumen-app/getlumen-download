@@ -6,13 +6,15 @@ import "./KeyInput.css";
 
 interface Props {
   onSubmit: (key: string) => void;
+  onBootstrapImport: (payload: string) => Promise<void>;
 }
 
 const TELEGRAM_BOT_URL = "https://t.me/ProteusKeyBot";
 
-export default function KeyInput({ onSubmit }: Props) {
+export default function KeyInput({ onSubmit, onBootstrapImport }: Props) {
   const [key, setKey] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-grow textarea height based on content (no manual resize drag).
@@ -27,6 +29,13 @@ export default function KeyInput({ onSubmit }: Props) {
   const detected = useMemo(() => {
     const v = key.trim();
     if (!v) return null;
+    if (isBootstrapPayload(v)) {
+      return {
+        type: "bootstrap",
+        valid: true,
+        label: "Lumen bootstrap profile",
+      };
+    }
     const type = detectType(v);
     if (type === "vless") {
       const valid = /vless:\/\/[^@]+@[^:/?#]+:\d+/.test(v);
@@ -51,11 +60,22 @@ export default function KeyInput({ onSubmit }: Props) {
     };
   }, [key]);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const trimmed = key.trim();
     if (!trimmed) {
       setError("Please enter your access key");
+      return;
+    }
+    if (isBootstrapPayload(trimmed)) {
+      setBusy(true);
+      try {
+        await onBootstrapImport(trimmed);
+      } catch (e) {
+        setError(`Bootstrap import failed: ${e}`);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
     if (!detected?.valid) {
@@ -113,7 +133,7 @@ export default function KeyInput({ onSubmit }: Props) {
         )}
         {error && <p className="key-input__error">{error}</p>}
         <button className="key-input__submit" type="submit">
-          Connect
+          {busy ? "Importing..." : isBootstrapPayload(key.trim()) ? "Import" : "Connect"}
         </button>
       </form>
 
@@ -136,4 +156,9 @@ export default function KeyInput({ onSubmit }: Props) {
       <p className="key-input__hint">@ProteusKeyBot · sends instructions in chat</p>
     </div>
   );
+}
+
+function isBootstrapPayload(value: string): boolean {
+  const s = value.trim();
+  return s.startsWith("lumen-bootstrap-v1:") || s.includes('"schema_version"') && s.includes("lumen.bootstrap.v1");
 }

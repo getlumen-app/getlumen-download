@@ -25,6 +25,29 @@ curl -sL https://github.com/getlumen-app/getlumen-download/releases/latest/downl
 2. Press Connect
 3. Lumen auto-selects the best server
 
+### Offline bootstrap profile
+
+Lumen `v2.5.6+` supports a per-user bootstrap payload for hostile networks where
+GitHub, cloud drive mirrors, or the Lumen config endpoint are blocked during a
+clean install. The app does not ship with a shared VPN profile. Instead, an
+operator or ProteusKeyBot generates a payload for one user account:
+
+```json
+{
+  "schema_version": "lumen.bootstrap.v1",
+  "name": "User bootstrap",
+  "vless": "vless://USER_UUID@HOST:443?...#User",
+  "preferred_mode": "proxy"
+}
+```
+
+For messenger copy/paste, URL-encode the JSON and prefix it with
+`lumen-bootstrap-v1:`. The first Lumen screen and Settings both accept this
+payload. Import validates the VLESS link, prebuilds local proxy/TUN configs, and
+sets the imported VLESS profile as active without fetching the control-plane
+config endpoint. If the payload leaks, only that user's VLESS/UUID must be
+revoked; there is no global embedded profile in the binary.
+
 ## Features
 
 - One-tap VPN connection via sing-box core
@@ -34,6 +57,7 @@ curl -sL https://github.com/getlumen-app/getlumen-download/releases/latest/downl
 - System theme detection, manual override in Settings
 - Config auto-fetch from subscription server
 - Offline mode with cached config
+- Per-user offline bootstrap import for clean installs on blocked networks
 - Smart split-tunneling (.ru domains direct, everything else via proxy)
 
 ## Architecture

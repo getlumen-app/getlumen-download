@@ -152,6 +152,22 @@ export function useKeyStore() {
     localStorage.removeItem(LEGACY_STORAGE);
   }, []);
 
+  const replaceWithKey = useCallback((value: string, name?: string): SavedKey | null => {
+    const v = value.trim();
+    if (!v) return null;
+    const type = detectType(v);
+    const k: SavedKey = {
+      id: genId(),
+      name: name?.trim() || defaultNameFor(v, type),
+      type,
+      value: v,
+      createdAt: Date.now(),
+    };
+    setState({ keys: [k], activeId: k.id });
+    localStorage.removeItem(LEGACY_STORAGE);
+    return k;
+  }, []);
+
   return {
     keys,
     activeKey,
@@ -161,5 +177,6 @@ export function useKeyStore() {
     renameKey,
     setActive,
     clearAll,
+    replaceWithKey,
   };
 }

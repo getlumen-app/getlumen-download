@@ -1,4 +1,5 @@
 mod clash_api;
+mod bootstrap;
 mod config;
 mod health_monitor;
 mod proxy;
@@ -106,7 +107,11 @@ pub(crate) fn extract_proteus_key(url: &str) -> Option<String> {
 }
 
 /// Build config (proxy mode) from any input type — VLESS link or Proteus sub key/URL.
-async fn prepare_proxy_config(key: &str) -> Result<(), String> {
+///
+/// Returns full-config URLs that should be retried after a bootstrap/cached
+/// proxy is connected. This lets a censored clean install use a minimal local
+/// route to fetch the normal smart-routing config without user handholding.
+async fn prepare_proxy_config(key: &str) -> Result<Vec<String>, String> {
     let raw = key.trim();
     // Normalize: if user pasted a full subscription URL for our backends,
     // extract the bare key so it routes through the CF Worker.
@@ -122,11 +127,31 @@ async fn prepare_proxy_config(key: &str) -> Result<(), String> {
             config::save_vless_config(&v, config::InboundMode::Mixed)
                 .await
                 .map_err(|e| format!("Config build failed: {}", e))?;
+            Ok(config::load_bootstrap_full_config_url()
+                .map(|url| vec![url])
+                .unwrap_or_default())
         }
         "subscription_url" => {
-            config::fetch_and_cache(key)
-                .await
-                .map_err(|e| format!("Config fetch failed: {}", e))?;
+            if let Err(fetch_err) = config::fetch_and_cache(key).await {
+                let cached = config::load_cached_proxy_config().map_err(|cache_err| {
+                    format!(
+                        "Config fetch failed: {} (no usable cached proxy config: {})",
+                        fetch_err, cache_err
+                    )
+                })?;
+                std::fs::write(config::config_file_path(), &cached).map_err(|write_err| {
+                    format!(
+                        "Config fetch failed: {}; cached proxy config write failed: {}",
+                        fetch_err, write_err
+                    )
+                })?;
+                log::warn!(
+                    "Config fetch failed ({}); connecting from cached proxy config and will retry through local proxy",
+                    fetch_err
+                );
+                return Ok(vec![key.to_string()]);
+            }
+            Ok(Vec::new())
         }
         _ => {
             let urls = config::proteus_config_urls(key);
@@ -147,13 +172,50 @@ async fn prepare_proxy_config(key: &str) -> Result<(), String> {
                     )
                 })?;
                 log::warn!(
-                    "Config fetch failed ({}); connecting from cached proxy config",
+                    "Config fetch failed ({}); connecting from cached proxy config and will retry through local proxy",
                     fetch_err
                 );
+                return Ok(urls);
             }
+            Ok(Vec::new())
         }
     }
-    Ok(())
+}
+
+async fn wait_for_clash_api() -> bool {
+    let probe = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap();
+
+    for _ in 0..3 {
+        if let Ok(resp) = probe.get("http://127.0.0.1:9090/version").send().await {
+            if resp.status().is_success() {
+                return true;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    false
+}
+
+fn set_lumen_proxy_env() {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("launchctl")
+            .args(["setenv", "https_proxy", "http://127.0.0.1:10808"])
+            .output()
+            .ok();
+        std::process::Command::new("launchctl")
+            .args(["setenv", "http_proxy", "http://127.0.0.1:10808"])
+            .output()
+            .ok();
+        std::process::Command::new("launchctl")
+            .args(["setenv", "all_proxy", "socks5://127.0.0.1:10808"])
+            .output()
+            .ok();
+    }
 }
 
 /// Inspect input — used by UI for auto-detect feedback.
@@ -187,16 +249,25 @@ fn detect_key(input: String) -> serde_json::Value {
 
 #[tauri::command]
 async fn fetch_config(key: String, state: State<'_, AppState>) -> Result<String, String> {
-    prepare_proxy_config(&key).await?;
+    let _ = prepare_proxy_config(&key).await?;
     let path = config::config_file_path();
     *state.config_path.lock().unwrap() = Some(path.to_string_lossy().to_string());
     Ok(std::fs::read_to_string(&path).unwrap_or_default())
 }
 
 #[tauri::command]
+async fn import_bootstrap_payload(
+    payload: String,
+) -> Result<bootstrap::BootstrapImportResult, String> {
+    bootstrap::import_bootstrap_payload(&payload)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> {
     // 1. Build config (auto-detects vless / sub URL / Proteus key)
-    prepare_proxy_config(&key).await?;
+    let promotion_urls = prepare_proxy_config(&key).await?;
 
     let path = config::config_file_path();
     let path_str = path.to_string_lossy().to_string();
@@ -211,24 +282,7 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
         .map_err(|e| format!("sing-box failed: {}", e))?;
 
     // 3. Verify Clash API is responding
-    let probe = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .unwrap();
-
-    let mut api_ok = false;
-    for _ in 0..3 {
-        if let Ok(resp) = probe.get("http://127.0.0.1:9090/version").send().await {
-            if resp.status().is_success() {
-                api_ok = true;
-                break;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    if !api_ok {
+    if !wait_for_clash_api().await {
         state.singbox.lock().unwrap().stop().ok();
         return Err("sing-box started but Clash API not responding".to_string());
     }
@@ -237,20 +291,46 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
     proxy::enable_system_proxy(10808).map_err(|e| format!("Proxy setup failed: {}", e))?;
 
     // 5. Set env vars for Electron apps (macOS only)
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("launchctl")
-            .args(["setenv", "https_proxy", "http://127.0.0.1:10808"])
-            .output()
-            .ok();
-        std::process::Command::new("launchctl")
-            .args(["setenv", "http_proxy", "http://127.0.0.1:10808"])
-            .output()
-            .ok();
-        std::process::Command::new("launchctl")
-            .args(["setenv", "all_proxy", "socks5://127.0.0.1:10808"])
-            .output()
-            .ok();
+    set_lumen_proxy_env();
+
+    // 6. If we connected from a bootstrap/cached config, try to promote to the
+    // full smart-routing config through the just-started local proxy. Keep the
+    // working bootstrap route if promotion fails.
+    if !promotion_urls.is_empty() {
+        match config::fetch_and_cache_first_available_with_mode_via_proxy(
+            &promotion_urls,
+            config::InboundMode::Mixed,
+            "http://127.0.0.1:10808",
+        )
+        .await
+        {
+            Ok(_) => {
+                log::info!("Full config fetched through bootstrap proxy; restarting sing-box");
+                state.singbox.lock().unwrap().stop().ok();
+                state
+                    .singbox
+                    .lock()
+                    .unwrap()
+                    .start(&path_str)
+                    .map_err(|e| format!("sing-box restart failed after full config fetch: {}", e))?;
+                if !wait_for_clash_api().await {
+                    state.singbox.lock().unwrap().stop().ok();
+                    return Err(
+                        "Full config fetched but sing-box restart did not expose Clash API"
+                            .to_string(),
+                    );
+                }
+                proxy::enable_system_proxy(10808)
+                    .map_err(|e| format!("Proxy setup failed after full config fetch: {}", e))?;
+                set_lumen_proxy_env();
+            }
+            Err(e) => {
+                log::warn!(
+                    "Full config promotion through bootstrap proxy failed; keeping bootstrap route: {}",
+                    e
+                );
+            }
+        }
     }
 
     Ok(())
@@ -580,6 +660,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             detect_key,
+            import_bootstrap_payload,
             fetch_config,
             connect,
             disconnect,

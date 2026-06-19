@@ -46,6 +46,10 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
   const [diagnostics, setDiagnostics] = useState<tauri.NetworkDiagnostics | null>(null);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
   const [diagnosticsCopyStatus, setDiagnosticsCopyStatus] = useState<string | null>(null);
+  const [bootstrapPayload, setBootstrapPayload] = useState("");
+  const [bootstrapBusy, setBootstrapBusy] = useState(false);
+  const [bootstrapStatus, setBootstrapStatus] = useState<string | null>(null);
+  const [telegramProxyStatus, setTelegramProxyStatus] = useState<string | null>(null);
   type VpnMode = "tun" | "proxy";
   const [vpnMode, setVpnMode] = useState<VpnMode>(
     () => (localStorage.getItem("lumen-vpn-mode") as VpnMode) || "tun"
@@ -150,6 +154,37 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
     } catch (e) {
       console.error("copy diagnostics:", e);
       setDiagnosticsCopyStatus("Copy failed");
+    }
+  }
+
+  async function handleCopyTelegramProxy() {
+    try {
+      await navigator.clipboard.writeText("SOCKS5 127.0.0.1 10808");
+      setTelegramProxyStatus("Copied");
+      setTimeout(() => setTelegramProxyStatus(null), 2000);
+    } catch (e) {
+      console.error("copy telegram proxy:", e);
+      setTelegramProxyStatus("Copy failed");
+    }
+  }
+
+  async function handleImportBootstrap() {
+    const payload = bootstrapPayload.trim();
+    if (!payload) return;
+    setBootstrapBusy(true);
+    setBootstrapStatus(null);
+    try {
+      const profile = await tauri.importBootstrapPayload(payload);
+      keyStore.replaceWithKey(profile.value, profile.name);
+      setVpnModeAndPersist(profile.preferred_mode);
+      localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
+      setBootstrapPayload("");
+      setBootstrapStatus("Bootstrap profile imported");
+    } catch (e) {
+      console.error("bootstrap import failed:", e);
+      setBootstrapStatus(`Import failed: ${e}`);
+    } finally {
+      setBootstrapBusy(false);
     }
   }
 
@@ -305,6 +340,30 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
         </section>
 
         <section className="settings__section">
+          <h3 className="settings__section-title">Bootstrap Import</h3>
+          <p className="settings__info">
+            Import a personal bootstrap profile when config servers are unavailable on a clean install.
+          </p>
+          <textarea
+            className="settings__bootstrap-input"
+            value={bootstrapPayload}
+            onChange={(e) => setBootstrapPayload(e.target.value)}
+            placeholder="lumen-bootstrap-v1:…"
+            rows={3}
+          />
+          <div className="settings__actions settings__actions--stack">
+            <button
+              className="settings__action-btn"
+              onClick={handleImportBootstrap}
+              disabled={!bootstrapPayload.trim() || bootstrapBusy}
+            >
+              {bootstrapBusy ? "Importing..." : "Import Bootstrap"}
+            </button>
+            {bootstrapStatus && <span className="settings__repair-status">{bootstrapStatus}</span>}
+          </div>
+        </section>
+
+        <section className="settings__section">
           <h3 className="settings__section-title">Network Repair</h3>
           <p className="settings__info">
             Stops Lumen proxy and TUN processes, clears Lumen proxy environment, and returns traffic to the current Wi-Fi route.
@@ -314,6 +373,22 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
               {repairBusy ? "Repairing..." : "Repair Network"}
             </button>
             {repairStatus && <span className="settings__repair-status">{repairStatus}</span>}
+          </div>
+        </section>
+
+        <section className="settings__section">
+          <h3 className="settings__section-title">Telegram Desktop</h3>
+          <p className="settings__info">
+            If Telegram stays on Updating while browsers work, use Lumen's local SOCKS5 proxy.
+          </p>
+          <div className="settings__actions settings__actions--stack">
+            <a className="settings__action-btn" href="tg://socks?server=127.0.0.1&port=10808">
+              Add Telegram Proxy
+            </a>
+            <button className="settings__action-btn" onClick={handleCopyTelegramProxy}>
+              Copy SOCKS5 127.0.0.1:10808
+            </button>
+            {telegramProxyStatus && <span className="settings__repair-status">{telegramProxyStatus}</span>}
           </div>
         </section>
 
@@ -350,7 +425,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
 
         {/* About */}
         <section className="settings__section settings__section--footer">
-          <p className="settings__version">Lumen v2.5.5</p>
+          <p className="settings__version">Lumen v2.5.7</p>
           <button className="settings__action-btn">Check for Updates</button>
           <button className="settings__logout-btn" onClick={onClearKey}>
             Sign Out
