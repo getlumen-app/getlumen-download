@@ -177,4 +177,36 @@ assert.equal(
   true
 );
 
+assert.equal(
+  typeof lib.shouldAttemptWbstreamOnConnectError,
+  "function",
+  "connect-error classifier must exist so control-plane failures do not jump to WB Stream"
+);
+
+assert.equal(
+  lib.shouldAttemptWbstreamOnConnectError(
+    "Config fetch failed: error sending request (no usable cached config: missing)"
+  ),
+  false,
+  "control-plane config fetch failure must NOT auto-start WB Stream"
+);
+
+assert.equal(
+  lib.shouldAttemptWbstreamOnConnectError("Config fetch failed: TLS reset"),
+  false,
+  "config fetch failure without cache still must NOT auto-start WB Stream"
+);
+
+assert.equal(
+  lib.shouldAttemptWbstreamOnConnectError("VLESS parse failed: bad link"),
+  false,
+  "bad key/link must NOT auto-start WB Stream"
+);
+
+assert.equal(
+  lib.shouldAttemptWbstreamOnConnectError("helper not running"),
+  false,
+  "local helper problems are not hard-whitelist symptoms"
+);
+
 console.log("connection-state tests OK");
