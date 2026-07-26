@@ -26,6 +26,11 @@ tokio = { version = "1", features = ["process", "fs", "time", "sync", "net", "io
 dirs = "6"
 url = "2"
 urlencoding = "2"
+base64 = "0.22"
+rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sha2"] }
+sha2 = "0.10"
+rand = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

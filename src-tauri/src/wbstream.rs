@@ -75,11 +75,11 @@ pub fn fallback_status(app: &tauri::AppHandle) -> WbstreamFallbackStatus {
 }
 
 pub async fn start_sidecar_from_cached_manifest(app: &tauri::AppHandle) -> Result<u16, String> {
-    config::ensure_wbstream_manifest_cached()
-        .await
-        .map_err(|e| format!("WB Stream manifest unavailable: {}", e))?;
+    // Cache-only: do not live-prefetch at fallback time (control-plane may be
+    // blocked; forged/stale network responses must not drive the carrier).
     let manifest = config::load_cached_wbstream_manifest()
         .map_err(|e| format!("WB Stream manifest unavailable: {}", e))?;
+    config::verify_wbstream_manifest_for_fallback(&manifest)?;
     let room_urls = config::select_wbstream_room_urls(&manifest, config::WBSTREAM_MAX_ROOMS);
     if room_urls.is_empty() {
         return Err("WB Stream manifest has no usable room".to_string());

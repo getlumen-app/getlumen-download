@@ -453,6 +453,15 @@ pub async fn prefetch_wbstream_manifest_sidecar() -> Result<(), String> {
                 )
                 .into());
             }
+            if let Err(e) =
+                verify_wbstream_manifest_signature_with_pem(&manifest, WBSTREAM_MANIFEST_PUBLIC_PEM)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("manifest signature rejected: {e}"),
+                )
+                .into());
+            }
             let path = wbstream_manifest_file_path();
             let body = serde_json::to_string_pretty(&manifest)?;
             std::fs::write(&path, body)?;
@@ -474,6 +483,10 @@ pub async fn prefetch_wbstream_manifest_sidecar() -> Result<(), String> {
     }
     Err(last_error.unwrap_or_else(|| "WB Stream manifest prefetch failed".to_string()))
 }
+
+/// Embedded RS256 public key for WB Stream room manifests (FirstByte signer).
+const WBSTREAM_MANIFEST_PUBLIC_PEM: &str =
+    include_str!("../keys/wbstream-manifest.pub.pem");
 
 fn is_usable_wbstream_manifest(manifest: &serde_json::Value) -> bool {
     if manifest.get("signature_alg").and_then(|v| v.as_str()) != Some("RS256") {
@@ -500,6 +513,82 @@ fn is_usable_wbstream_manifest(manifest: &serde_json::Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// Verify RS256 over decoded `payload_b64` and that `payload` matches it.
+pub fn verify_wbstream_manifest_signature_with_pem(
+    manifest: &serde_json::Value,
+    public_pem: &str,
+) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::{Pkcs1v15Sign, RsaPublicKey};
+    use sha2::{Digest, Sha256};
+
+    if manifest.get("signature_alg").and_then(|v| v.as_str()) != Some("RS256") {
+        return Err("unsupported signature_alg".to_string());
+    }
+    let payload_b64 = manifest
+        .get("payload_b64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "manifest missing payload_b64".to_string())?;
+    let signature_b64 = manifest
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "manifest missing signature".to_string())?;
+    let payload_obj = manifest
+        .get("payload")
+        .ok_or_else(|| "manifest missing payload".to_string())?;
+
+    let payload_bytes = STANDARD
+        .decode(payload_b64)
+        .map_err(|e| format!("payload_b64 decode failed: {e}"))?;
+    let signature = STANDARD
+        .decode(signature_b64)
+        .map_err(|e| format!("signature decode failed: {e}"))?;
+
+    let decoded_payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| format!("payload_b64 JSON invalid: {e}"))?;
+    if payload_obj != &decoded_payload {
+        return Err("payload does not match payload_b64".to_string());
+    }
+
+    let public_key = RsaPublicKey::from_public_key_pem(public_pem.trim())
+        .map_err(|e| format!("public key parse failed: {e}"))?;
+    let digest = Sha256::digest(&payload_bytes);
+    public_key
+        .verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &signature)
+        .map_err(|_| "RS256 signature verification failed".to_string())?;
+    Ok(())
+}
+
+/// Full fallback gate: shape + RS256 against embedded key + non-expired valid_until.
+pub fn verify_wbstream_manifest_for_fallback(
+    manifest: &serde_json::Value,
+) -> Result<(), String> {
+    verify_wbstream_manifest_for_fallback_with_pem(manifest, WBSTREAM_MANIFEST_PUBLIC_PEM)
+}
+
+fn verify_wbstream_manifest_for_fallback_with_pem(
+    manifest: &serde_json::Value,
+    public_pem: &str,
+) -> Result<(), String> {
+    if !is_usable_wbstream_manifest(manifest) {
+        return Err("WB Stream manifest shape unusable".to_string());
+    }
+    verify_wbstream_manifest_signature_with_pem(manifest, public_pem)?;
+    let valid_until = manifest
+        .get("payload")
+        .and_then(|p| p.get("valid_until"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "manifest missing valid_until".to_string())?;
+    let until = chrono::DateTime::parse_from_rfc3339(valid_until)
+        .map_err(|e| format!("valid_until parse failed: {e}"))?;
+    let now = chrono::Utc::now();
+    if until.with_timezone(&chrono::Utc) + chrono::Duration::seconds(60) < now {
+        return Err(format!("WB Stream manifest expired at {valid_until}"));
+    }
+    Ok(())
 }
 
 fn strip_client_side_metadata(config: &mut serde_json::Value) {
@@ -1683,6 +1772,110 @@ mod tests {
             "signature": "sig"
         });
         assert!(!is_usable_wbstream_manifest(&bad_manifest));
+    }
+
+    fn sign_wbstream_manifest_for_test(
+        payload: serde_json::Value,
+        private_key: &rsa::RsaPrivateKey,
+    ) -> serde_json::Value {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use rsa::Pkcs1v15Sign;
+        use sha2::{Digest, Sha256};
+
+        let payload_bytes = serde_json::to_vec(&payload).expect("payload json");
+        let digest = Sha256::digest(&payload_bytes);
+        let signature = private_key
+            .sign(Pkcs1v15Sign::new::<Sha256>(), &digest)
+            .expect("sign");
+        serde_json::json!({
+            "payload": payload,
+            "payload_b64": STANDARD.encode(&payload_bytes),
+            "signature_alg": "RS256",
+            "signature": STANDARD.encode(signature),
+        })
+    }
+
+    #[test]
+    fn wbstream_manifest_rejects_forged_shape_only_signature() {
+        let forged = serde_json::json!({
+            "payload": {
+                "kind": "proteus-wbstream-room-manifest",
+                "valid_until": "2099-01-01T00:00:00Z",
+                "rooms": [
+                    { "role": "active", "priority": 0, "url": "wbstream://forged" }
+                ]
+            },
+            "payload_b64": "e30=",
+            "signature_alg": "RS256",
+            "signature": "sig"
+        });
+        assert!(is_usable_wbstream_manifest(&forged));
+        let err = verify_wbstream_manifest_for_fallback(&forged).unwrap_err();
+        assert!(
+            err.contains("signature")
+                || err.contains("decode")
+                || err.contains("match")
+                || err.contains("payload"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wbstream_manifest_accepts_valid_rs256_and_rejects_wrong_key() {
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+
+        let mut rng = rand::thread_rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        let public_pem = RsaPublicKey::from(&private_key)
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("pem");
+
+        let until = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let payload = serde_json::json!({
+            "kind": "proteus-wbstream-room-manifest",
+            "key_id": "test",
+            "valid_until": until,
+            "rooms": [
+                { "role": "active", "priority": 0, "url": "wbstream://test-room" }
+            ]
+        });
+        let manifest = sign_wbstream_manifest_for_test(payload, &private_key);
+        assert!(is_usable_wbstream_manifest(&manifest));
+        verify_wbstream_manifest_signature_with_pem(&manifest, &public_pem).expect("verify ok");
+        assert!(
+            verify_wbstream_manifest_signature_with_pem(&manifest, WBSTREAM_MANIFEST_PUBLIC_PEM)
+                .is_err(),
+            "ephemeral-signed manifest must fail against production public key"
+        );
+    }
+
+    #[test]
+    fn wbstream_manifest_fallback_rejects_expired_valid_until() {
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+
+        let mut rng = rand::thread_rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        let public_pem = RsaPublicKey::from(&private_key)
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("pem");
+
+        let payload = serde_json::json!({
+            "kind": "proteus-wbstream-room-manifest",
+            "key_id": "test",
+            "valid_until": "2020-01-01T00:00:00Z",
+            "rooms": [
+                { "role": "active", "priority": 0, "url": "wbstream://expired" }
+            ]
+        });
+        let manifest = sign_wbstream_manifest_for_test(payload, &private_key);
+        let err =
+            verify_wbstream_manifest_for_fallback_with_pem(&manifest, &public_pem).unwrap_err();
+        assert!(
+            err.contains("expired"),
+            "expected expiry rejection, got: {err}"
+        );
     }
 
     #[test]

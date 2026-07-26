@@ -77,6 +77,27 @@ export function diagnosticRouteLabel(status: string): string {
   return "Direct";
 }
 
+/**
+ * Connect-time WB Stream auto-fallback gate.
+ *
+ * Hard-whitelist carrier must NOT run on control-plane / local failures
+ * (blocked config host, missing cache, bad key, helper down). Those are
+ * handled by cache-first Proteus connect. WB Stream is reserved for the
+ * post-connect health-monitor path when TUN is up but exits look dead.
+ */
+export function shouldAttemptWbstreamOnConnectError(errorMsg: string): boolean {
+  const msg = String(errorMsg || "").toLowerCase();
+  if (!msg) return false;
+  if (msg.includes("config fetch failed")) return false;
+  if (msg.includes("no usable cached config")) return false;
+  if (msg.includes("vless parse failed")) return false;
+  if (msg.includes("config build failed")) return false;
+  if (msg.includes("helper")) return false;
+  if (msg.includes("permission")) return false;
+  // Connect-time default: do not jump. Health monitor owns WB switch.
+  return false;
+}
+
 export function diagnosticLocationLabel(diagnostics: NetworkDiagnosticsLike): string {
   if (diagnostics.error) return "Unavailable";
   const parts = [diagnostics.region, diagnostics.country].filter(Boolean);

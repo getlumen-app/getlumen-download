@@ -10,6 +10,7 @@ import { useKeyStore } from "./hooks/useKeyStore";
 import {
   CONNECTION_INTENT_KEY,
   readStoredConnectionIntent,
+  shouldAttemptWbstreamOnConnectError,
   shouldSelfHealOnLaunch,
   shouldStopTunOnDisconnect,
   transportFromEffectiveStatus,
@@ -322,7 +323,9 @@ export default function App() {
     } catch (e) {
       const msg = String(e);
       console.error("Connect error:", msg);
-      if (useTun) {
+      // Control-plane / local failures must not jump to WB Stream (Doha class).
+      // Hard-whitelist carrier is owned by the post-connect health monitor.
+      if (useTun && shouldAttemptWbstreamOnConnectError(msg)) {
         try {
           setCurrentServer("WB Stream");
           await tauri.tunConnectWbstreamFallback();
@@ -333,6 +336,8 @@ export default function App() {
         } catch (fallbackError) {
           console.error("WB Stream fallback error:", fallbackError);
           setErrorMsg(`${msg}; WB Stream fallback failed: ${fallbackError}`);
+          setConnectionState("error");
+          return;
         }
       } else {
         setErrorMsg(msg);
