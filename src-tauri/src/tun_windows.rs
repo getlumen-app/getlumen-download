@@ -102,8 +102,12 @@ fn candidate_singbox_paths() -> Vec<PathBuf> {
     ]
 }
 
+fn windows_tun_canary_enabled() -> bool {
+    std::env::var("LUMEN_WINDOWS_TUN_CANARY").ok().as_deref() == Some("1")
+}
+
 pub fn is_helper_installed() -> bool {
-    candidate_singbox_paths().iter().any(|path| path.is_file())
+    windows_tun_canary_enabled() && candidate_singbox_paths().iter().any(|path| path.is_file())
 }
 
 pub async fn is_helper_running() -> bool {
@@ -165,6 +169,12 @@ pub async fn send(req: Request) -> Result<Response, String> {
 }
 
 fn start(config_path: &str, singbox_path: &str) -> Result<u32, String> {
+    if !windows_tun_canary_enabled() {
+        return Err(
+            "Windows TUN canary is disabled; use System Proxy while validation is pending"
+                .to_string(),
+        );
+    }
     if let Some(record) = read_record().filter(record_is_running) {
         return Ok(record.pid);
     }

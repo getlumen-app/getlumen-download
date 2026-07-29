@@ -3,6 +3,14 @@ import { readFile } from "node:fs/promises";
 
 const lib = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const cargo = await readFile(new URL("../src-tauri/Cargo.toml", import.meta.url), "utf8");
+const tunWindows = await readFile(
+  new URL("../src-tauri/src/tun_windows.rs", import.meta.url),
+  "utf8",
+);
+const settings = await readFile(
+  new URL("../src/pages/Settings.tsx", import.meta.url),
+  "utf8",
+);
 const workflow = await readFile(
   new URL("../.github/workflows/release-guard.yml", import.meta.url),
   "utf8",
@@ -44,6 +52,21 @@ assert.match(
   workflow,
   /cargo test --manifest-path src-tauri\/Cargo\.toml --release --lib/,
   "the Windows runner must execute Rust tests before building NSIS",
+);
+assert.match(
+  tunWindows,
+  /LUMEN_WINDOWS_TUN_CANARY/,
+  "Windows TUN must require an explicit operator canary opt-in",
+);
+assert.match(
+  tunWindows,
+  /if !windows_tun_canary_enabled\(\)/,
+  "the privileged Windows TUN start path must fail closed without canary opt-in",
+);
+assert.match(
+  settings,
+  /localStorage\.getItem\("lumen-vpn-mode"\) as VpnMode\) \|\| "proxy"/,
+  "Windows-safe connection settings must default to System Proxy",
 );
 
 console.log("Windows TUN source contract tests passed");
