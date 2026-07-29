@@ -158,7 +158,7 @@ export async function testDelay(name: string): Promise<number> {
   return invoke<number>("test_delay", { name });
 }
 
-// TUN mode (via privileged helper, macOS only)
+// TUN mode (via the platform privileged runtime on macOS and Windows)
 interface TunStatus {
   helper_installed: boolean;
   helper_running: boolean;

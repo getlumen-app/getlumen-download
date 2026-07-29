@@ -1,10 +1,15 @@
 /// Tauri commands exposed to React for TUN mode (via privileged helper).
 use crate::config;
-use crate::tun_helper::{self, Request, Response};
+#[cfg(target_os = "macos")]
+use crate::tun_helper as tun_runtime;
+#[cfg(target_os = "windows")]
+use crate::tun_windows as tun_runtime;
+#[cfg(target_os = "macos")]
 use crate::wbstream::{self, WbstreamFallbackStatus};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::Manager;
+use tun_runtime::{Request, Response};
 
 #[derive(Serialize)]
 pub struct TunStatus {
@@ -18,7 +23,7 @@ pub struct TunStatus {
 /// Get current TUN helper + sing-box status.
 #[tauri::command]
 pub async fn tun_status() -> Result<TunStatus, String> {
-    let installed = tun_helper::is_helper_installed();
+    let installed = tun_runtime::is_helper_installed();
     if !installed {
         return Ok(TunStatus {
             helper_installed: false,
@@ -29,7 +34,7 @@ pub async fn tun_status() -> Result<TunStatus, String> {
         });
     }
 
-    let running = tun_helper::is_helper_running().await;
+    let running = tun_runtime::is_helper_running().await;
     if !running {
         return Ok(TunStatus {
             helper_installed: true,
@@ -40,7 +45,7 @@ pub async fn tun_status() -> Result<TunStatus, String> {
         });
     }
 
-    match tun_helper::send(Request::Status).await {
+    match tun_runtime::send(Request::Status).await {
         Ok(Response::Status {
             running,
             pid,
@@ -57,28 +62,44 @@ pub async fn tun_status() -> Result<TunStatus, String> {
     }
 }
 
-/// Install helper via osascript admin prompt. One-time setup.
+/// Install/validate the platform TUN runtime.
 #[tauri::command]
 pub fn tun_install_helper(app: tauri::AppHandle) -> Result<(), String> {
-    let (installer, source_helper) = bundled_paths(&app)?;
-    tun_helper::install_helper(
-        &installer.to_string_lossy(),
-        &source_helper.to_string_lossy(),
-    )
+    #[cfg(target_os = "macos")]
+    {
+        let (installer, source_helper) = bundled_paths(&app)?;
+        tun_runtime::install_helper(
+            &installer.to_string_lossy(),
+            &source_helper.to_string_lossy(),
+        )
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let singbox = bundled_singbox_path(&app)?;
+        tun_runtime::install_helper("", &singbox.to_string_lossy())
+    }
 }
 
 /// Uninstall helper.
 #[tauri::command]
 pub fn tun_uninstall_helper(app: tauri::AppHandle) -> Result<(), String> {
-    let (installer, _) = bundled_paths(&app)?;
-    tun_helper::uninstall_helper(&installer.to_string_lossy())
+    #[cfg(target_os = "macos")]
+    {
+        let (installer, _) = bundled_paths(&app)?;
+        tun_runtime::uninstall_helper(&installer.to_string_lossy())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        tun_runtime::uninstall_helper("")
+    }
 }
 
 /// Start sing-box via helper. Helper runs sing-box as root → TUN mode works.
 #[tauri::command]
 pub async fn tun_start(config_path: String, app: tauri::AppHandle) -> Result<u32, String> {
     let singbox_path = bundled_singbox_path(&app)?;
-    match tun_helper::send(Request::Start {
+    match tun_runtime::send(Request::Start {
         config_path,
         singbox_path: singbox_path.to_string_lossy().to_string(),
     })
@@ -92,7 +113,24 @@ pub async fn tun_start(config_path: String, app: tauri::AppHandle) -> Result<u32
 
 /// Full TUN connect: build config (auto-detect input type), save to disk, ask helper to start sing-box.
 #[tauri::command]
-pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, String> {
+pub async fn tun_connect(
+    key: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<u32, String> {
+    // TUN and System Proxy are mutually exclusive. Stop the per-user proxy
+    // runtime before asking Windows/macOS for privileged TUN routing.
+    crate::proxy::disable_system_proxy()
+        .map_err(|e| format!("Could not disable System Proxy before TUN: {e}"))?;
+    if state.singbox.lock().unwrap().is_running() {
+        state
+            .singbox
+            .lock()
+            .unwrap()
+            .stop()
+            .map_err(|e| format!("Could not stop System Proxy runtime before TUN: {e}"))?;
+    }
+
     // 1. Build TUN config — auto-detect VLESS link / sub URL / Proteus key
     let raw = key.trim();
     // Normalize: full subscription URLs for our backends → bare key via CF Worker
@@ -157,7 +195,7 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
 
     // 2. Ask helper to start
     let singbox_path = bundled_singbox_path(&app)?;
-    match tun_helper::send(Request::Start {
+    match tun_runtime::send(Request::Start {
         config_path,
         singbox_path: singbox_path.to_string_lossy().to_string(),
     })
@@ -175,6 +213,7 @@ pub async fn tun_connect(key: String, app: tauri::AppHandle) -> Result<u32, Stri
 /// repeatedly, and the command remains separate so diagnostics can invoke it
 /// directly without duplicating fallback setup.
 #[tauri::command]
+#[cfg(target_os = "macos")]
 pub async fn tun_connect_wbstream_fallback(app: tauri::AppHandle) -> Result<u32, String> {
     let socks_port = wbstream::start_sidecar_from_cached_manifest(&app).await?;
     config::save_wbstream_fallback_config(config::InboundMode::Tun, socks_port)
@@ -182,7 +221,7 @@ pub async fn tun_connect_wbstream_fallback(app: tauri::AppHandle) -> Result<u32,
 
     let config_path = config::tun_config_file_path().to_string_lossy().to_string();
     let singbox_path = bundled_singbox_path(&app)?;
-    match tun_helper::send(Request::Start {
+    match tun_runtime::send(Request::Start {
         config_path,
         singbox_path: singbox_path.to_string_lossy().to_string(),
     })
@@ -203,8 +242,8 @@ pub async fn tun_connect_wbstream_fallback(app: tauri::AppHandle) -> Result<u32,
 /// Disconnect TUN: stop sing-box via helper.
 #[tauri::command]
 pub async fn tun_disconnect() -> Result<(), String> {
-    wbstream::stop_sidecar();
-    match tun_helper::send(Request::Stop).await? {
+    stop_wbstream_sidecar();
+    match tun_runtime::send(Request::Stop).await? {
         Response::Stopped => Ok(()),
         Response::Error { message } => Err(message),
         other => Err(format!("Unexpected response: {:?}", other)),
@@ -214,8 +253,8 @@ pub async fn tun_disconnect() -> Result<(), String> {
 /// Stop sing-box.
 #[tauri::command]
 pub async fn tun_stop() -> Result<(), String> {
-    wbstream::stop_sidecar();
-    match tun_helper::send(Request::Stop).await? {
+    stop_wbstream_sidecar();
+    match tun_runtime::send(Request::Stop).await? {
         Response::Stopped => Ok(()),
         Response::Error { message } => Err(message),
         other => Err(format!("Unexpected response: {:?}", other)),
@@ -223,11 +262,13 @@ pub async fn tun_stop() -> Result<(), String> {
 }
 
 #[tauri::command]
+#[cfg(target_os = "macos")]
 pub fn wbstream_fallback_status(app: tauri::AppHandle) -> Result<WbstreamFallbackStatus, String> {
     Ok(wbstream::fallback_status(&app))
 }
 
 #[tauri::command]
+#[cfg(target_os = "macos")]
 pub fn wbstream_stop_sidecar() -> Result<(), String> {
     wbstream::stop_sidecar();
     Ok(())
@@ -236,14 +277,27 @@ pub fn wbstream_stop_sidecar() -> Result<(), String> {
 /// Resolve bundled installer + helper paths.
 /// Tauri puts resources at Lumen.app/Contents/Resources/_up_/bin/<name>
 /// when source path was "../bin/...".
+#[cfg(target_os = "macos")]
 fn bundled_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
     let bin = bin_dir(app)?;
     Ok((bin.join("lumen-installer"), bin.join("lumen-helper")))
 }
 
 fn bundled_singbox_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(bin_dir(app)?.join("sing-box"))
+    #[cfg(target_os = "macos")]
+    let filename = "sing-box";
+    #[cfg(target_os = "windows")]
+    let filename = "sing-box.exe";
+    Ok(bin_dir(app)?.join(filename))
 }
+
+#[cfg(target_os = "macos")]
+fn stop_wbstream_sidecar() {
+    wbstream::stop_sidecar();
+}
+
+#[cfg(target_os = "windows")]
+fn stop_wbstream_sidecar() {}
 
 fn bin_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app

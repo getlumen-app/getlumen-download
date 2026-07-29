@@ -425,7 +425,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
 
         {/* About */}
         <section className="settings__section settings__section--footer">
-          <p className="settings__version">Lumen v2.5.7</p>
+          <p className="settings__version">Lumen v2.5.8</p>
           <button className="settings__action-btn">Check for Updates</button>
           <button className="settings__logout-btn" onClick={onClearKey}>
             Sign Out

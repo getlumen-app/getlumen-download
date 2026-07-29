@@ -1,13 +1,13 @@
 {
   "name": "lumen",
   "private": true,
-  "version": "2.5.7",
+  "version": "2.5.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test:release-guard": "node scripts/test-release-guard.mjs && node scripts/test-release-scripts.mjs && node scripts/test-github-actions.mjs",
+    "test:release-guard": "node scripts/test-release-guard.mjs && node scripts/test-release-scripts.mjs && node scripts/test-github-actions.mjs && node scripts/test-windows-tun.mjs",
     "release:guard": "node scripts/release-guard.mjs",
     "release:verify": "npm run test:release-guard && node scripts/test-connection-state.mjs && npm run build && npm run release:guard",
     "tauri": "tauri",
