@@ -114,15 +114,25 @@ npm run tauri build
 
 The GitHub Actions `build-windows` job builds the NSIS installer on
 `windows-latest`. It downloads `sing-box.exe`, builds
-`wbstream_multipath_client.exe`, copies both into `bin/`, then runs:
+`wbstream_multipath_client.exe`, copies both into `bin/`, runs the Rust tests
+against the Windows target, then runs:
 
 ```bash
-npm run tauri -- build -- --bundles nsis
+npm run tauri -- build --bundles nsis
 ```
+
+Lumen `v2.5.8` contains a Windows TUN canary, but ordinary Windows builds fail
+closed to System Proxy. A real Windows test showed that the first canary could
+blackhole browser traffic, so TUN is hidden and its privileged start path is
+blocked unless an operator explicitly launches Lumen with
+`LUMEN_WINDOWS_TUN_CANARY=1`. The canary records the exact elevated PID and
+executable path so cleanup never uses an unscoped process-name kill. It is not
+eligible for a public release until route/DNS readiness and recovery are
+validated on Windows.
 
 WB Stream hard-whitelist fallback on Windows still needs a Windows build of
 `headless-wbstream-joiner.exe`; until that sidecar exists, Windows builds are
-for normal proxy-mode validation and release plumbing.
+for normal System Proxy and controlled TUN validation, not WB Stream fallback.
 
 ### Release guard
 

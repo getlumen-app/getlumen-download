@@ -4,10 +4,12 @@ mod config;
 mod health_monitor;
 mod proxy;
 mod singbox;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod tun_commands;
 #[cfg(target_os = "macos")]
 mod tun_helper;
+#[cfg(target_os = "windows")]
+mod tun_windows;
 mod vless;
 #[cfg(target_os = "macos")]
 mod wbstream;
@@ -432,7 +434,7 @@ async fn get_effective_status(state: State<'_, AppState>) -> Result<String, Stri
         return Ok("connected-proxy".to_string());
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         if let Ok(status) = tun_commands::tun_status().await {
             if status.singbox_running {
@@ -483,7 +485,7 @@ async fn network_diagnostics(state: State<'_, AppState>) -> Result<NetworkDiagno
         error: None,
     };
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         if let Ok(status) = tun_commands::tun_status().await {
             diagnostics.helper_installed = status.helper_installed;
@@ -540,7 +542,10 @@ async fn repair_network(state: State<'_, AppState>) -> Result<RepairNetworkResul
                 .output()
                 .ok();
         }
+    }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
         match tun_commands::tun_status().await {
             Ok(status) => {
                 result.tun_was_running = status.singbox_running;
@@ -676,21 +681,21 @@ pub fn run() {
             test_delay,
             open_url,
             get_logs,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_status,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_install_helper,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_uninstall_helper,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_start,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_stop,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_connect,
             #[cfg(target_os = "macos")]
             tun_commands::tun_connect_wbstream_fallback,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_disconnect,
             #[cfg(target_os = "macos")]
             tun_commands::wbstream_fallback_status,

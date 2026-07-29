@@ -38,7 +38,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
   const [killSwitch, setKillSwitch] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // VPN mode state — TUN by default, user can override
+  // VPN mode state — System Proxy is the fail-closed default.
   const [tunStatus, setTunStatus] = useState<TunStatus | null>(null);
   const [tunBusy, setTunBusy] = useState(false);
   const [repairBusy, setRepairBusy] = useState(false);
@@ -52,7 +52,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
   const [telegramProxyStatus, setTelegramProxyStatus] = useState<string | null>(null);
   type VpnMode = "tun" | "proxy";
   const [vpnMode, setVpnMode] = useState<VpnMode>(
-    () => (localStorage.getItem("lumen-vpn-mode") as VpnMode) || "tun"
+    () => (localStorage.getItem("lumen-vpn-mode") as VpnMode) || "proxy"
   );
 
   function setVpnModeAndPersist(mode: VpnMode) {
@@ -425,7 +425,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
 
         {/* About */}
         <section className="settings__section settings__section--footer">
-          <p className="settings__version">Lumen v2.5.7</p>
+          <p className="settings__version">Lumen v2.5.8</p>
           <button className="settings__action-btn">Check for Updates</button>
           <button className="settings__logout-btn" onClick={onClearKey}>
             Sign Out

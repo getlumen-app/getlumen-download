@@ -105,8 +105,59 @@ pub fn redact_sub_query_in_text(text: &str) -> String {
 pub enum InboundMode {
     /// HTTP/SOCKS proxy on 127.0.0.1:10808 — runs as user, no root needed
     Mixed,
-    /// TUN interface (utun) — needs root via privileged helper, low latency
+    /// TUN interface — needs a privileged runtime, low latency
     Tun,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TunPolicy {
+    interface_name: &'static str,
+    mtu: u16,
+    strict_route: bool,
+}
+
+fn tun_policy_for_target(target_os: &str) -> TunPolicy {
+    match target_os {
+        "windows" => TunPolicy {
+            interface_name: "Lumen",
+            mtu: 1500,
+            strict_route: true,
+        },
+        _ => TunPolicy {
+            interface_name: "utun777",
+            mtu: 9000,
+            strict_route: false,
+        },
+    }
+}
+
+fn tun_inbounds_for_target(target_os: &str) -> serde_json::Value {
+    let policy = tun_policy_for_target(target_os);
+    serde_json::json!([
+        {
+            "type": "tun",
+            "tag": "tun-in",
+            "interface_name": policy.interface_name,
+            "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+            "mtu": policy.mtu,
+            "auto_route": true,
+            "strict_route": policy.strict_route,
+            "stack": "mixed",
+            "endpoint_independent_nat": true,
+            "sniff": true,
+            "sniff_override_destination": false
+        }
+    ])
+}
+
+fn tun_inbounds() -> serde_json::Value {
+    tun_inbounds_for_target(std::env::consts::OS)
+}
+
+fn enforce_requested_inbound(config: &mut serde_json::Value, mode: InboundMode) {
+    if matches!(mode, InboundMode::Tun) {
+        config["inbounds"] = tun_inbounds();
+    }
 }
 
 pub fn tun_config_file_path() -> PathBuf {
@@ -368,8 +419,9 @@ async fn parse_and_cache_config_body(body: &str, mode: InboundMode) -> Result<St
         && server_config.get("route").is_some();
 
     let config = if is_full_config {
-        log::info!("Server returned full sing-box config — using as-is (mode override ignored)");
+        log::info!("Server returned full sing-box config");
         strip_client_side_metadata(&mut server_config);
+        enforce_requested_inbound(&mut server_config, mode);
         server_config
     } else {
         build_config_from_server(&server_config, mode)?
@@ -702,21 +754,7 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
                     "sniff_override_destination": false
                 }
             ]),
-            InboundMode::Tun => serde_json::json!([
-                {
-                    "type": "tun",
-                    "tag": "tun-in",
-                    "interface_name": "utun777",
-                    "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
-                    "mtu": 9000,
-                    "auto_route": true,
-                    "strict_route": false,
-                    "stack": "mixed",
-                    "endpoint_independent_nat": true,
-                    "sniff": true,
-                    "sniff_override_destination": false
-                }
-            ]),
+            InboundMode::Tun => tun_inbounds(),
         },
         "outbounds": [
             {
@@ -1039,28 +1077,10 @@ fn build_config_from_server(
                     "sniff_override_destination": false
                 }
             ]),
-            InboundMode::Tun => serde_json::json!([
-                {
-                    "type": "tun",
-                    "tag": "tun-in",
-                    "interface_name": "utun777",
-                    "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
-                    "mtu": 9000,
-                    "auto_route": true,
-                    "strict_route": false,
-                    "stack": "mixed",
-                    "endpoint_independent_nat": true,
-                    "sniff": true,
-                    // Do NOT override destination with sniffed domain.
-                    // DNS resolution already goes through dns-proxy (Cloudflare
-                    // DoH tunnelled via VPN), so resolved IPs are correct.
-                    // override=true breaks Telegram's anti-censorship proxies:
-                    // TG connects to DC IPs with fake SNI (e.g. "www.google.com")
-                    // and override rewrites the destination to Google instead
-                    // of the real DC. Verified 2026-04-16 on @STmarkml (Moscow).
-                    "sniff_override_destination": false
-                }
-            ]),
+            // Do NOT override destination with the sniffed domain. DNS
+            // resolution already goes through dns-proxy, and override=true
+            // breaks applications that connect to an IP with a decoy SNI.
+            InboundMode::Tun => tun_inbounds(),
         },
         "outbounds": [],
         "route": {
@@ -1191,6 +1211,36 @@ pub fn _load_cached() -> Result<String, ConfigError> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn windows_tun_policy_uses_windows_safe_route_contract() {
+        let policy = tun_policy_for_target("windows");
+        assert_eq!(policy.interface_name, "Lumen");
+        assert_eq!(policy.mtu, 1500);
+        assert!(policy.strict_route, "Windows TUN must prevent DNS leaks");
+    }
+
+    #[test]
+    fn macos_tun_policy_preserves_existing_route_contract() {
+        let policy = tun_policy_for_target("macos");
+        assert_eq!(policy.interface_name, "utun777");
+        assert_eq!(policy.mtu, 9000);
+        assert!(!policy.strict_route);
+    }
+
+    #[test]
+    fn requested_tun_mode_replaces_full_server_config_inbound() {
+        let mut config = serde_json::json!({
+            "dns": {},
+            "inbounds": [{"type": "mixed", "listen_port": 10808}],
+            "route": {},
+            "outbounds": [{"type": "direct", "tag": "direct"}]
+        });
+        enforce_requested_inbound(&mut config, InboundMode::Tun);
+        let inbound = &config["inbounds"][0];
+        assert_eq!(inbound["type"], "tun");
+        assert_eq!(inbound["auto_route"], true);
+    }
 
     #[test]
     fn vless_tag_is_never_reserved() {

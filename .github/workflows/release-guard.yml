@@ -62,6 +62,9 @@ jobs:
           cargo build --manifest-path wbstream-multipath-aggregator/Cargo.toml --release --bin wbstream_multipath_client
           Copy-Item "wbstream-multipath-aggregator/target/release/wbstream_multipath_client.exe" "bin/wbstream_multipath_client.exe" -Force
 
+      - name: Test Windows Rust runtime
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release --lib
+
       - name: Build Windows NSIS bundle
         run: npm run tauri -- build --bundles nsis
 
