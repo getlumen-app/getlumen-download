@@ -18,7 +18,7 @@
   flex-shrink: 0;
 }
 
-/* ── Server info ── */
+/* ── Server info / location chip ── */
 .home__server {
   display: flex;
   align-items: center;
@@ -28,6 +28,28 @@
   border-radius: var(--radius-pill);
   border: 1px solid var(--border);
   cursor: default;
+  font: inherit;
+  color: inherit;
+}
+
+.home__server--interactive {
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.home__server--interactive:hover {
+  border-color: var(--accent);
+}
+
+.home__server--interactive:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.home__server-chevron {
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  margin-left: 2px;
 }
 
 .home__flag {
@@ -132,4 +154,104 @@
   width: 1px;
   height: 20px;
   background: var(--border);
+}
+
+/* ── Location sheet (Hiddify-like) ── */
+.home__sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 40;
+  padding: 0;
+}
+
+.home__sheet {
+  width: 100%;
+  max-width: 420px;
+  max-height: min(70vh, 480px);
+  background: var(--bg);
+  border-radius: 16px 16px 0 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  padding: 12px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.25);
+}
+
+.home__sheet-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  margin: 0 auto 4px;
+}
+
+.home__sheet-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--fg);
+  margin: 0 0 4px;
+  text-align: center;
+}
+
+.home__sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.home__sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.home__sheet-row:hover {
+  background: var(--bg-raised);
+}
+
+.home__sheet-row.active {
+  background: var(--bg-raised);
+}
+
+.home__sheet-flag {
+  font-size: 18px;
+  width: 28px;
+  text-align: center;
+}
+
+.home__sheet-label {
+  flex: 1;
+  font-size: var(--fs-base);
+  font-weight: 500;
+}
+
+.home__sheet-delay {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+
+.home__sheet-check {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: var(--fs-md);
 }

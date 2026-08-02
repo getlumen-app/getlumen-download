@@ -25,11 +25,19 @@ interface Props {
   keyStore: ReturnType<typeof useKeyStore>;
   onClearKey: () => void;
   onViewLogs?: () => void;
+  /** When connected, switching TUN↔Proxy should hot-swap the live session. */
+  onVpnModeChange?: (mode: "tun" | "proxy") => void;
 }
 
 type ThemeOption = "system" | "light" | "dark";
 
-export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }: Props) {
+export default function Settings({
+  accessKey,
+  keyStore,
+  onClearKey,
+  onViewLogs,
+  onVpnModeChange,
+}: Props) {
   const [theme, setTheme] = useState<ThemeOption>(() => {
     return (localStorage.getItem("lumen-theme") as ThemeOption) || "dark";
   });
@@ -56,8 +64,10 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
   );
 
   function setVpnModeAndPersist(mode: VpnMode) {
+    if (mode === vpnMode) return;
     setVpnMode(mode);
     localStorage.setItem("lumen-vpn-mode", mode);
+    onVpnModeChange?.(mode);
   }
 
   useEffect(() => {
@@ -135,6 +145,8 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
         region: null,
         country: null,
         asn_org: null,
+        probe_source: null,
+        probe_via: null,
         error: String(e),
       };
       setDiagnostics(fallback);
@@ -296,7 +308,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
                   <span className="settings__mode-icon" aria-hidden="true">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                   </span>
-                  <strong>System Proxy mode</strong> — works without root, but slower (~2× higher latency).
+                  <strong>System Proxy mode</strong> — works without root; apps that ignore the OS proxy (Telegram Desktop) need SOCKS5 <code>127.0.0.1:10808</code>.
                 </p>
                 <div className="settings__actions">
                   <button className="settings__action-btn" onClick={handleUninstallHelper} disabled={tunBusy}>
@@ -318,7 +330,7 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
                 <span className="settings__mode-icon" aria-hidden="true">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 </span>
-                <strong>System Proxy mode</strong> (~2× slower). Install VPN helper for TUN mode and lower latency.
+                <strong>System Proxy mode</strong>. Install VPN helper for TUN — lower latency and full-app coverage (Telegram without a separate SOCKS).
               </p>
               <div className="settings__actions">
                 <button className="settings__action-btn" onClick={handleInstallHelper} disabled={tunBusy}>
@@ -413,6 +425,18 @@ export default function Settings({ accessKey, keyStore, onClearKey, onViewLogs }
             <strong>{diagnostics ? diagnosticLocationLabel(diagnostics) : "Unknown"}</strong>
             <span>Provider</span>
             <strong>{diagnostics?.asn_org ?? "Unknown"}</strong>
+            <span>IP check</span>
+            <strong>
+              {diagnostics?.probe_source || diagnostics?.probe_via
+                ? `${diagnostics?.probe_source ?? "—"} · ${
+                    diagnostics?.probe_via === "local-proxy"
+                      ? "via VPN proxy"
+                      : diagnostics?.probe_via === "direct-socket"
+                        ? "direct/TUN path"
+                        : diagnostics?.probe_via ?? "—"
+                  }`
+                : "Unknown"}
+            </strong>
             <span>Helper</span>
             <strong>
               {diagnostics?.helper_running ? "Running" : diagnostics?.helper_installed ? "Installed" : "Not installed"}
