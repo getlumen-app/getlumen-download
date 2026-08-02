@@ -22,6 +22,120 @@ pub struct SingboxManager {
     running: bool,
 }
 
+/// True when a process command line is the System Proxy sing-box (`config.json`),
+/// not the privileged helper TUN instance (`config-tun.json`).
+///
+/// Tun cmdline example (must return false):
+///   sing-box run -c …/io.getlumen.app/config-tun.json
+/// Proxy cmdline example (must return true):
+///   sing-box run -c …/io.getlumen.app/config.json
+///
+/// Note: `"config.json"` is NOT a substring of `"config-tun.json"`.
+pub fn cmdline_is_proxy_singbox(cmdline: &str) -> bool {
+    let c = cmdline.to_ascii_lowercase();
+    if !c.contains("sing-box") {
+        return false;
+    }
+    // Helper TUN / last-good must never count as System Proxy.
+    if c.contains("config-tun") {
+        return false;
+    }
+    c.contains("config.json")
+}
+
+/// Scan process table for a System Proxy sing-box (never helper TUN).
+fn any_proxy_singbox_process() -> bool {
+    #[cfg(unix)]
+    {
+        let output = silent_command("ps")
+            .args(["-ax", "-o", "command="])
+            .output();
+        match output {
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(cmdline_is_proxy_singbox),
+            Err(_) => false,
+        }
+    }
+    #[cfg(windows)]
+    {
+        // tasklist has no cmdline — use WMIC; fall back to port check via name
+        // only when CommandLine is unavailable (still reject if we cannot tell).
+        let output = silent_command("wmic")
+            .args([
+                "process",
+                "where",
+                "name='sing-box.exe'",
+                "get",
+                "CommandLine",
+            ])
+            .output();
+        match output {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                // WMIC prints a header line "CommandLine" then rows.
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("CommandLine"))
+                    .any(cmdline_is_proxy_singbox)
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Stop only System Proxy sing-box processes. Never `killall sing-box` — that
+/// also murders the helper TUN instance and causes Stop→Start thrash.
+fn kill_proxy_singbox_processes(force: bool) {
+    #[cfg(unix)]
+    {
+        // BRE: config\.json does not match config-tun.json.
+        let signal = if force { "-9" } else { "-15" };
+        silent_command("pkill")
+            .args([signal, "-f", "sing-box.*config\\.json"])
+            .output()
+            .ok();
+    }
+    #[cfg(windows)]
+    {
+        // Enumerate and taskkill by PID only when CommandLine is proxy config.
+        let output = silent_command("wmic")
+            .args([
+                "process",
+                "where",
+                "name='sing-box.exe'",
+                "get",
+                "ProcessId,CommandLine",
+                "/FORMAT:LIST",
+            ])
+            .output();
+        if let Ok(o) = output {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let mut cmdline = String::new();
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(rest) = line
+                    .strip_prefix("CommandLine=")
+                    .or_else(|| line.strip_prefix("Commandline="))
+                {
+                    cmdline = rest.to_string();
+                } else if let Some(pid) = line
+                    .strip_prefix("ProcessId=")
+                    .or_else(|| line.strip_prefix("Processid="))
+                {
+                    if cmdline_is_proxy_singbox(&cmdline) {
+                        silent_command("taskkill")
+                            .args(["/F", "/PID", pid.trim()])
+                            .output()
+                            .ok();
+                    }
+                    cmdline.clear();
+                }
+            }
+        }
+    }
+}
+
 impl SingboxManager {
     pub fn new() -> Self {
         let running = Self::check_running_static();
@@ -61,7 +175,7 @@ impl SingboxManager {
             }
         }
 
-        // Kill any old sing-box
+        // Kill any old System Proxy sing-box (never helper TUN).
         Self::kill_all();
         std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -102,7 +216,7 @@ impl SingboxManager {
     }
 
     pub fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        log::info!("Stopping sing-box");
+        log::info!("Stopping System Proxy sing-box");
         Self::kill_all();
         std::thread::sleep(std::time::Duration::from_millis(500));
         // Force kill if still alive
@@ -119,56 +233,15 @@ impl SingboxManager {
     }
 
     fn check_running_static() -> bool {
-        #[cfg(unix)]
-        {
-            silent_command("pgrep")
-                .args(["-f", "sing-box run"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
-        #[cfg(windows)]
-        {
-            silent_command("tasklist")
-                .args(["/FI", "IMAGENAME eq sing-box.exe", "/NH"])
-                .output()
-                .map(|o| {
-                    let text = String::from_utf8_lossy(&o.stdout);
-                    text.contains("sing-box.exe")
-                })
-                .unwrap_or(false)
-        }
+        any_proxy_singbox_process()
     }
 
     fn kill_all() {
-        #[cfg(unix)]
-        {
-            silent_command("killall").arg("sing-box").output().ok();
-        }
-        #[cfg(windows)]
-        {
-            silent_command("taskkill")
-                .args(["/F", "/IM", "sing-box.exe"])
-                .output()
-                .ok();
-        }
+        kill_proxy_singbox_processes(false);
     }
 
     fn force_kill() {
-        #[cfg(unix)]
-        {
-            silent_command("pkill")
-                .args(["-9", "-f", "sing-box run"])
-                .output()
-                .ok();
-        }
-        #[cfg(windows)]
-        {
-            silent_command("taskkill")
-                .args(["/F", "/IM", "sing-box.exe"])
-                .output()
-                .ok();
-        }
+        kill_proxy_singbox_processes(true);
     }
 
     fn find_binary() -> Result<String, Box<dyn std::error::Error>> {
@@ -265,8 +338,22 @@ impl Drop for SingboxManager {
 
 #[cfg(test)]
 mod tests {
-    use super::SingboxManager;
+    use super::{cmdline_is_proxy_singbox, SingboxManager};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn cmdline_classifier_distinguishes_proxy_from_tun() {
+        assert!(cmdline_is_proxy_singbox(
+            "sing-box run -c /Users/user/Library/Caches/io.getlumen.app/config.json"
+        ));
+        assert!(!cmdline_is_proxy_singbox(
+            "sing-box run -c /Users/user/Library/Caches/io.getlumen.app/config-tun.json"
+        ));
+        assert!(!cmdline_is_proxy_singbox(
+            "sing-box run -c /tmp/config-tun-lastgood.json"
+        ));
+        assert!(!cmdline_is_proxy_singbox("nginx"));
+    }
 
     /// Regression for the Windows "screen blinks every ~5s" bug (Polina, 2026-06-10).
     /// Root cause: process-status spawns (`tasklist`/`taskkill`) on Windows were

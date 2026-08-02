@@ -40,8 +40,124 @@ assert.equal(
     singbox_pid: null,
     uptime_secs: null,
   }),
+  true,
+  "teardown always asks helper to stop — no-op when TUN already down"
+);
+
+{
+  const plan = lib.planSessionTeardown("proxy", {
+    helper_installed: true,
+    helper_running: true,
+    singbox_running: false,
+    singbox_pid: null,
+    uptime_secs: null,
+  });
+  assert.equal(plan.stopProxy, true, "proxy session must stop System Proxy");
+  assert.equal(
+    plan.stopTun,
+    true,
+    "teardown always stops both planes — never leave an orphan transport"
+  );
+}
+
+{
+  const plan = lib.planSessionTeardown("tun", {
+    helper_installed: true,
+    helper_running: true,
+    singbox_running: true,
+    singbox_pid: 1,
+    uptime_secs: 1,
+  });
+  assert.equal(plan.stopProxy, true, "TUN teardown must also clear orphan proxy");
+  assert.equal(plan.stopTun, true, "TUN teardown must stop helper TUN");
+}
+
+assert.equal(
+  lib.shouldStopTunOnDisconnect("proxy", true, {
+    helper_installed: true,
+    helper_running: true,
+    singbox_running: false,
+    singbox_pid: null,
+    uptime_secs: null,
+  }),
+  true,
+  "preferredTun=true must still stop proxy AND ask TUN stop (never divert to TUN-only)"
+);
+
+assert.equal(
+  lib.shouldApplyEffectiveStatusSync({
+    connectionState: "disconnected",
+    connectInFlight: true,
+    storedIntent: "disconnected",
+  }),
+  "skip",
+  "in-flight disconnect must not let status poll snap UI back to Connected"
+);
+
+assert.equal(
+  lib.shouldApplyEffectiveStatusSync({
+    connectionState: "disconnected",
+    connectInFlight: false,
+    storedIntent: "disconnected",
+  }),
+  "force_disconnected",
+  "intent=disconnected must never apply a live TUN/proxy as Connected"
+);
+
+assert.equal(
+  lib.shouldApplyEffectiveStatusSync({
+    connectionState: "connected",
+    connectInFlight: false,
+    storedIntent: "connected",
+  }),
+  "apply",
+  "intentional session may mirror effective status"
+);
+
+assert.equal(
+  lib.shouldApplyEffectiveStatusSync({
+    connectionState: "connecting",
+    connectInFlight: false,
+    storedIntent: "connected",
+  }),
+  "skip",
+  "connecting owns the UI"
+);
+
+assert.equal(
+  lib.shouldDisconnectOnPowerTap("connected"),
+  true,
+  "power tap while connected always disconnects"
+);
+
+assert.equal(
+  lib.shouldDisconnectOnPowerTap("disconnected"),
   false,
-  "proxy-only disconnect should not call helper when no TUN is running"
+  "power tap while disconnected is connect, not disconnect"
+);
+
+assert.equal(
+  lib.shouldSwitchModeOnPowerTap("connected", "proxy", true),
+  true,
+  "connected on proxy + prefer TUN → Settings mode change switches transport"
+);
+
+assert.equal(
+  lib.shouldSwitchModeOnPowerTap("connected", "tun", true),
+  false,
+  "already on preferred TUN → power tap disconnects"
+);
+
+assert.equal(
+  lib.shouldSwitchModeOnPowerTap("connected", "tun", false),
+  true,
+  "connected on TUN + prefer proxy → power tap switches mode"
+);
+
+assert.equal(
+  lib.shouldSwitchModeOnPowerTap("disconnected", "proxy", true),
+  false,
+  "disconnected → power tap is a normal connect, not a mode switch"
 );
 
 assert.equal(
@@ -154,6 +270,7 @@ assert.equal(
     "External IP: 91.75.100.14",
     "Location: Dubai, United Arab Emirates",
     "Provider: Emirates Integrated Telecommunications Company PJSC",
+    "Probe: Unknown via Unknown",
     "Helper: Running",
     "TUN: Stopped",
   ].join("\n")

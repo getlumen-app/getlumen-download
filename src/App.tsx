@@ -9,14 +9,22 @@ import * as tauri from "./hooks/useTauri";
 import { useKeyStore } from "./hooks/useKeyStore";
 import {
   CONNECTION_INTENT_KEY,
+  planSessionTeardown,
   readStoredConnectionIntent,
+  shouldApplyEffectiveStatusSync,
   shouldAttemptWbstreamOnConnectError,
+  shouldDisconnectOnPowerTap,
   shouldSelfHealOnLaunch,
-  shouldStopTunOnDisconnect,
+  shouldSwitchModeOnPowerTap,
   transportFromEffectiveStatus,
   type ActiveTransport,
   type ConnectionState,
 } from "./lib/connectionState";
+import {
+  LOCATION_OPTIONS,
+  readStoredLocation,
+  writeStoredLocation,
+} from "./lib/locations";
 import "./App.css";
 
 type Tab = "home" | "proxies" | "settings";
@@ -43,8 +51,7 @@ export default function App() {
   const accessKey = keyStore.activeKey?.value ?? null;
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [errorMsg, setErrorMsg] = useState("");
-  const [currentServer, setCurrentServer] = useState("Auto Select");
-  const [currentFlag] = useState("⚡");
+  const [currentServer, setCurrentServer] = useState(() => readStoredLocation());
   const [latency, setLatency] = useState(0);
   const [uploadSpeed, setUploadSpeed] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
@@ -56,17 +63,68 @@ export default function App() {
   const healthFailures = useRef(0);
   const fallbackSwitching = useRef(false);
   const launchSelfHealChecked = useRef(false);
+  const locationAppliedRef = useRef(false);
+  const connectInFlight = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     async function syncEffectiveStatus() {
       try {
+        const storedIntent = readStoredConnectionIntent(
+          localStorage.getItem(CONNECTION_INTENT_KEY)
+        );
+        const syncAction = shouldApplyEffectiveStatusSync({
+          connectionState,
+          connectInFlight: connectInFlight.current,
+          storedIntent,
+        });
+        // Never fight an in-flight connect/disconnect/mode-switch, and never
+        // snap Connected back while the user asked to disconnect (teardown
+        // still draining → 2s "reconnect" flash, 2026-08-02).
+        if (syncAction === "skip") return;
+
         const status = await tauri.getEffectiveStatus();
         if (cancelled) return;
+        // Re-evaluate after await — disconnect may have started mid-poll.
+        const intentNow = readStoredConnectionIntent(
+          localStorage.getItem(CONNECTION_INTENT_KEY)
+        );
+        const actionNow = shouldApplyEffectiveStatusSync({
+          connectionState,
+          connectInFlight: connectInFlight.current,
+          storedIntent: intentNow,
+        });
+        if (actionNow === "skip") return;
         const transport = transportFromEffectiveStatus(status);
+
+        if (actionNow === "force_disconnected") {
+          if (transport && !connectInFlight.current) {
+            connectInFlight.current = true;
+            try {
+              try {
+                await tauri.disconnect();
+              } catch (e) {
+                console.warn("disconnect-intent proxy stop:", e);
+              }
+              try {
+                await tauri.tunDisconnect();
+              } catch (e) {
+                console.warn("disconnect-intent tun stop:", e);
+              }
+            } finally {
+              connectInFlight.current = false;
+            }
+          }
+          if (cancelled) return;
+          setActiveTransport(null);
+          setConnectionState("disconnected");
+          setCurrentServer(readStoredLocation());
+          locationAppliedRef.current = false;
+          return;
+        }
+
         if (!launchSelfHealChecked.current) {
           launchSelfHealChecked.current = true;
-          const storedIntent = readStoredConnectionIntent(localStorage.getItem(CONNECTION_INTENT_KEY));
           if (shouldSelfHealOnLaunch(storedIntent, transport)) {
             if (transport === "proxy") {
               await tauri.disconnect();
@@ -76,18 +134,19 @@ export default function App() {
             if (cancelled) return;
             setActiveTransport(null);
             setConnectionState("disconnected");
-            setCurrentServer("Auto Select");
+            setCurrentServer(readStoredLocation());
             return;
           }
         }
         if (transport) {
           setActiveTransport(transport);
           setConnectionState("connected");
-          setCurrentServer(transport === "tun" ? "Lumen TUN" : "System Proxy");
+          // Keep geo tag on Home; do not overwrite with TUN/proxy mode labels.
         } else if (connectionState === "connected") {
           setActiveTransport(null);
           setConnectionState("disconnected");
-          setCurrentServer("Auto Select");
+          setCurrentServer(readStoredLocation());
+          locationAppliedRef.current = false;
         }
       } catch (e) {
         console.warn("effective status sync failed:", e);
@@ -191,18 +250,39 @@ export default function App() {
 
       if (groups.length > 0) {
         setProxyGroups(groups);
-        // Auto-group lookup: Proteus config uses "proxy-auto", single-VLESS config uses "proxy".
-        // Fall back to any URLTest as the active auto-group so Home can display the server name.
+        // Prefer outer selector `proxy` (sticky pin). Fall back to proxy-auto
+        // urltest `now` for older configs without a selector wrapper.
+        const selector =
+          groups.find((g) => g.name === "proxy" && g.type === "Selector") ??
+          groups.find((g) => g.name === "proxy");
         const autoGroup =
           groups.find((g) => g.name === "proxy-auto") ??
-          groups.find((g) => g.name === "proxy") ??
           groups.find((g) => g.type === "URLTest");
-        if (autoGroup?.now) {
-          setCurrentServer(autoGroup.now);
-          // Don't set latency from stale Clash cache here. Proxies' TCP-RTT
-          // test owns the value via setLatency below in handleSelectProxy
-          // and (if added) in a future Home-side test. Keep latency=0
-          // so Home shows the "—" pending placeholder.
+        const now = selector?.now || autoGroup?.now;
+        if (now) {
+          setCurrentServer(now);
+        }
+
+        // Re-apply stored location once per connect so preference survives
+        // Clash cache / reconnect without fighting ongoing Auto probes later.
+        if (!locationAppliedRef.current && selector) {
+          const preferred = readStoredLocation();
+          const allowed = new Set(selector.all);
+          if (preferred && preferred !== "proxy-auto" && allowed.has(preferred)) {
+            locationAppliedRef.current = true;
+            void tauri.selectProxy("proxy", preferred).then(() => {
+              setCurrentServer(preferred);
+              setProxyGroups((gs) =>
+                gs.map((g) =>
+                  g.name === "proxy" ? { ...g, now: preferred } : g
+                )
+              );
+            }).catch(() => {
+              locationAppliedRef.current = false;
+            });
+          } else {
+            locationAppliedRef.current = true;
+          }
         }
       }
     } catch {
@@ -212,7 +292,10 @@ export default function App() {
 
   // Poll proxy data when connected
   useEffect(() => {
-    if (connectionState !== "connected") return;
+    if (connectionState !== "connected") {
+      locationAppliedRef.current = false;
+      return;
+    }
     fetchProxyData(); // immediate
     const interval = setInterval(fetchProxyData, 5000);
     return () => clearInterval(interval);
@@ -272,42 +355,38 @@ export default function App() {
     };
   }, [connectionState, activeTransport]);
 
-  async function handleConnect() {
-    // Mode resolution:
-    //   1. If user explicitly chose 'proxy' in Settings → system proxy
-    //   2. Else if helper available → TUN
-    //   3. Else → system proxy fallback
-    const userPref = localStorage.getItem("lumen-vpn-mode"); // "tun" | "proxy" | null
-    const tunReady = await tauri.isTunAvailable();
-    const useTun = userPref === "proxy" ? false : tunReady;
-
-    if (connectionState === "connected") {
-      // Disconnect
-      setConnectionState("disconnected");
-      localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
-      setUploadSpeed(0);
-      setDownloadSpeed(0);
-      setProxyGroups([]);
+  async function tearDownSession() {
+    const tunStatus = await tauri.tunStatus();
+    const plan = planSessionTeardown(activeTransport, tunStatus);
+    // Stop proxy first, then TUN. Effective status prefers TUN when helper is up.
+    if (plan.stopProxy) {
       try {
-        const tunStatus = await tauri.tunStatus();
-        if (shouldStopTunOnDisconnect(activeTransport, useTun, tunStatus)) {
-          await tauri.tunDisconnect();
-        } else {
-          await tauri.disconnect();
-        }
+        await tauri.disconnect();
       } catch (e) {
-        console.error("Disconnect error:", e);
-      } finally {
-        setActiveTransport(null);
-        setCurrentServer("Auto Select");
-        healthFailures.current = 0;
+        console.error("Proxy disconnect error:", e);
       }
-      return;
     }
+    if (plan.stopTun) {
+      try {
+        await tauri.tunDisconnect();
+      } catch (e) {
+        console.error("TUN disconnect error:", e);
+      }
+    }
+    setActiveTransport(null);
+    setUploadSpeed(0);
+    setDownloadSpeed(0);
+    setProxyGroups([]);
+    setCurrentServer(readStoredLocation());
+    locationAppliedRef.current = false;
+    healthFailures.current = 0;
+  }
 
+  async function connectWithPreferredMode(useTun: boolean) {
     if (!accessKey) return;
     setConnectionState("connecting");
     setErrorMsg("");
+    locationAppliedRef.current = false;
 
     try {
       if (useTun) {
@@ -320,6 +399,7 @@ export default function App() {
       }
       localStorage.setItem(CONNECTION_INTENT_KEY, "connected");
       setConnectionState("connected");
+      setCurrentServer(readStoredLocation());
     } catch (e) {
       const msg = String(e);
       console.error("Connect error:", msg);
@@ -351,6 +431,67 @@ export default function App() {
     }
   }
 
+  async function switchToPreferredMode(useTun: boolean) {
+    if (connectInFlight.current) return;
+    connectInFlight.current = true;
+    try {
+      setConnectionState("connecting");
+      localStorage.setItem(CONNECTION_INTENT_KEY, "connected");
+      await tearDownSession();
+      await connectWithPreferredMode(useTun);
+    } finally {
+      connectInFlight.current = false;
+    }
+  }
+
+  async function handleVpnModeChange(mode: "tun" | "proxy") {
+    if (connectionState !== "connected") return;
+    const tunReady = mode === "tun" ? await tauri.isTunAvailable() : false;
+    const useTun = mode === "tun" && tunReady;
+    if (mode === "tun" && !tunReady) return;
+    if (!shouldSwitchModeOnPowerTap("connected", activeTransport, useTun)) return;
+    await switchToPreferredMode(useTun);
+  }
+
+  async function handleConnect() {
+    if (connectInFlight.current || connectionState === "connecting") return;
+
+    // Mode resolution:
+    //   1. If user explicitly chose 'proxy' in Settings → system proxy
+    //   2. Else if helper available → TUN
+    //   3. Else → system proxy fallback
+    const userPref = localStorage.getItem("lumen-vpn-mode"); // "tun" | "proxy" | null
+    const tunReady = await tauri.isTunAvailable();
+    const useTun = userPref === "proxy" ? false : tunReady;
+
+    // Power button while Connected always disconnects. Mode hot-swap lives in
+    // Settings (handleVpnModeChange) — power-tap switch caused Stop→Start thrash
+    // whenever activeTransport briefly disagreed with preference.
+    if (shouldDisconnectOnPowerTap(connectionState)) {
+      connectInFlight.current = true;
+      try {
+        localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
+        setConnectionState("disconnected");
+        setActiveTransport(null);
+        setUploadSpeed(0);
+        setDownloadSpeed(0);
+        await tearDownSession();
+        setConnectionState("disconnected");
+        setActiveTransport(null);
+      } finally {
+        connectInFlight.current = false;
+      }
+      return;
+    }
+
+    connectInFlight.current = true;
+    try {
+      await connectWithPreferredMode(useTun);
+    } finally {
+      connectInFlight.current = false;
+    }
+  }
+
   function handleSaveKey(key: string) {
     keyStore.addKey(key);
     // After first-time authorization the user should land on Home,
@@ -378,16 +519,45 @@ export default function App() {
         g.name === groupName ? { ...g, now: nodeName } : g
       )
     );
-    // Update Home's displayed server when the auto-group (Proteus "proxy-auto" or
-    // single-VLESS "proxy") selection changes.
-    if (groupName === "proxy-auto" || groupName === "proxy") {
+    // Outer selector `proxy` (or legacy proxy-auto) drives Home location.
+    if (groupName === "proxy" || groupName === "proxy-auto") {
       setCurrentServer(nodeName);
+      writeStoredLocation(nodeName);
       const node = proxyGroups
         .find((g) => g.name === groupName)
         ?.nodes.find((n) => n.name === nodeName);
       if (node) setLatency(node.delay);
     }
   }
+
+  async function handleSelectLocation(tag: string) {
+    writeStoredLocation(tag);
+    setCurrentServer(tag);
+    if (connectionState !== "connected") return;
+    try {
+      await tauri.selectProxy("proxy", tag);
+      setProxyGroups((groups) =>
+        groups.map((g) => (g.name === "proxy" ? { ...g, now: tag } : g))
+      );
+    } catch (e) {
+      console.warn("select location failed:", e);
+    }
+  }
+
+  const locationGroup =
+    proxyGroups.find((g) => g.name === "proxy") ??
+    proxyGroups.find((g) => g.name === "proxy-auto");
+  // When disconnected, still offer the full geo sheet so preference can be set
+  // before connect; Clash membership is applied after connect.
+  const locationNodes =
+    locationGroup?.nodes ??
+    LOCATION_OPTIONS.map((o) => ({
+      name: o.tag,
+      type: o.tag === "proxy-auto" ? "URLTest" : "VLESS",
+      alive: true,
+      delay: 0,
+      history: [] as { delay: number }[],
+    }));
 
   if (!accessKey) {
     return <KeyInput onSubmit={handleSaveKey} onBootstrapImport={handleBootstrapImport} />;
@@ -400,12 +570,13 @@ export default function App() {
           <Home
             connectionState={connectionState === "error" ? "disconnected" : connectionState}
             currentServer={currentServer}
-            currentFlag={currentFlag}
             latency={latency}
             uploadSpeed={uploadSpeed}
             downloadSpeed={downloadSpeed}
             connectionTime={connectionTime}
             onConnect={handleConnect}
+            locationNodes={locationNodes}
+            onSelectLocation={handleSelectLocation}
             errorMsg={errorMsg}
           />
         )}
@@ -426,6 +597,7 @@ export default function App() {
               keyStore.clearAll();
             }}
             onViewLogs={() => setShowLogs(true)}
+            onVpnModeChange={handleVpnModeChange}
           />
         )}
       </div>

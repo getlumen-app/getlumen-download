@@ -157,7 +157,50 @@ fn tun_inbounds() -> serde_json::Value {
 fn enforce_requested_inbound(config: &mut serde_json::Value, mode: InboundMode) {
     if matches!(mode, InboundMode::Tun) {
         config["inbounds"] = tun_inbounds();
+        // Without DNS hijack, browsers keep the ISP resolver under TUN and
+        // fail with NXDOMAIN while System Proxy still works (Ekaterina 2026-07-31).
+        ensure_dns_hijack_route_rule(config);
     }
+}
+
+/// Insert `protocol=dns` → `action=hijack-dns` as the first route rule.
+///
+/// Our bundled sing-box rejects inbound `dns_mode` (pre-1.14 field) but accepts
+/// the modern rule action. Idempotent: skips when hijack (or legacy dns-out)
+/// is already present.
+fn ensure_dns_hijack_route_rule(config: &mut serde_json::Value) {
+    let rules = match config
+        .pointer_mut("/route/rules")
+        .and_then(|r| r.as_array_mut())
+    {
+        Some(rules) => rules,
+        None => {
+            if !config.get("route").map(|r| r.is_object()).unwrap_or(false) {
+                config["route"] = serde_json::json!({});
+            }
+            config["route"]["rules"] = serde_json::json!([]);
+            config
+                .pointer_mut("/route/rules")
+                .and_then(|r| r.as_array_mut())
+                .expect("route.rules just created")
+        }
+    };
+
+    let already = rules.iter().any(|r| {
+        r.get("action").and_then(|a| a.as_str()) == Some("hijack-dns")
+            || (r.get("protocol").and_then(|p| p.as_str()) == Some("dns")
+                && r.get("outbound").and_then(|o| o.as_str()) == Some("dns-out"))
+    });
+    if already {
+        return;
+    }
+    rules.insert(
+        0,
+        serde_json::json!({
+            "protocol": "dns",
+            "action": "hijack-dns"
+        }),
+    );
 }
 
 pub fn tun_config_file_path() -> PathBuf {
@@ -722,7 +765,7 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
         "194.1.214.97/32",
     ]);
 
-    serde_json::json!({
+    let mut config = serde_json::json!({
         "log": {"level": "info", "timestamp": true},
         "dns": {
             "servers": [
@@ -785,7 +828,11 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
                 "path": cache_path.to_string_lossy()
             }
         }
-    })
+    });
+    if matches!(mode, InboundMode::Tun) {
+        ensure_dns_hijack_route_rule(&mut config);
+    }
+    config
 }
 
 const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] =
@@ -795,10 +842,10 @@ const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] =
 /// Used when user supplies a raw vless:// URI instead of a Proteus subscription.
 ///
 /// IMPORTANT: the outbound tag must NOT collide with reserved tags used by the
-/// wrapping config — specifically "proxy" (the urltest group name), "direct",
-/// "block", or route targets — otherwise sing-box rejects the config with a
-/// duplicate-tag error and the Clash API returns empty, which surfaces in the UI
-/// as an empty Proxies list.
+/// wrapping config — specifically "proxy" (selector), "proxy-auto" (urltest),
+/// "direct", "block", or route targets — otherwise sing-box rejects the config
+/// with a duplicate-tag error and the Clash API returns empty, which surfaces
+/// in the UI as an empty Proxies list.
 pub fn build_config_from_vless(
     vless: &crate::vless::VlessConfig,
     mode: InboundMode,
@@ -819,7 +866,15 @@ pub fn build_config_from_vless(
 /// - Result is lowercased to keep Clash API names consistent
 fn vless_outbound_tag(raw_name: &str) -> String {
     const RESERVED: &[&str] = &[
-        "proxy", "proxy-tg", "proxy-yt", "direct", "block", "dns-out", "dns-in", "tun-in",
+        "proxy",
+        "proxy-auto",
+        "proxy-tg",
+        "proxy-yt",
+        "direct",
+        "block",
+        "dns-out",
+        "dns-in",
+        "tun-in",
         "mixed-in",
     ];
     let sanitized: String = raw_name
@@ -871,9 +926,58 @@ pub async fn save_vless_config(
     Ok(final_json)
 }
 
+/// Manual geo-picker leaves (Hiddify-like). Order is UI order.
+/// USA pin is FirstByte-only — never hostodo-via-timeweb here.
+const GEO_SELECTOR_TAGS: &[&str] = &[
+    "hostodo-via-firstbyte",
+    "relay-eu-443",
+    "dubai-residential",
+    "izhevsk-via-firstbyte",
+    "firstbyte-moscow-reality",
+    "proxy-moscow",
+];
+
+/// Leaves that may appear in the selector for explicit pin, but must never
+/// join Auto urltest (true RF exits / residentials). USA/Germany pins that
+/// are also RF-relay entrypoints stay eligible for Auto.
+const AUTO_EXCLUDED_GEO_TAGS: &[&str] = &[
+    "dubai-residential",
+    "izhevsk-via-firstbyte",
+    "izhevsk-via-netcup",
+    "firstbyte-moscow-reality",
+    "proxy-moscow",
+];
+
+/// Prefer Hostodo-via-FirstByte ahead of Hostodo-via-Timeweb inside Auto urltest.
+/// Only swaps those two relative positions; other member order is unchanged.
+fn prioritize_hostodo_firstbyte(members: &[String]) -> Vec<String> {
+    let mut out = members.to_vec();
+    let fb = out.iter().position(|m| m == "hostodo-via-firstbyte");
+    let tw = out.iter().position(|m| m == "hostodo-via-timeweb");
+    if let (Some(i_fb), Some(i_tw)) = (fb, tw) {
+        if i_fb > i_tw {
+            out.swap(i_fb, i_tw);
+        }
+    }
+    out
+}
+
+fn geo_selector_members(available: &[String]) -> Vec<String> {
+    GEO_SELECTOR_TAGS
+        .iter()
+        .filter(|tag| available.iter().any(|a| a == *tag))
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 /// Build sing-box config from server-provided outbounds.
 /// Server is responsible for all proxy outbounds (IPs, keys, transport).
-/// Client only adds: DNS, inbounds, route rules, urltest group, direct/block.
+/// Client adds: DNS, inbounds, route rules, selector+urltest groups, direct/block.
+///
+/// Shape (Hiddify-safe autorouting):
+///   selector `proxy` (default=`proxy-auto`) → [proxy-auto, …geo leaves]
+///   urltest  `proxy-auto` → vision-safe Auto members (today's probe semantics)
+///   urltest  `proxy-tg` / `proxy-yt` → independent service probes (unchanged)
 fn build_config_from_server(
     server: &serde_json::Value,
     mode: InboundMode,
@@ -931,11 +1035,29 @@ fn build_config_from_server(
         })
         .collect();
     // Fallback: if ALL exits are TCP Reality, use them anyway (better than empty group)
-    let service_names = if service_proxy_names.is_empty() {
-        &proxy_names
+    let service_names_raw: Vec<String> = if service_proxy_names.is_empty() {
+        proxy_names.clone()
     } else {
-        &service_proxy_names
+        service_proxy_names
     };
+    // Drop manual-only geo exits from Auto (moscow / residential). Keep them
+    // available on the selector for explicit pin.
+    let service_names_filtered: Vec<String> = service_names_raw
+        .into_iter()
+        .filter(|tag| !AUTO_EXCLUDED_GEO_TAGS.contains(&tag.as_str()))
+        .collect();
+    let service_names_for_auto = if service_names_filtered.is_empty() {
+        // Degenerate payload: only manual-only leaves — fall back so Auto is
+        // non-empty (same spirit as the all-vision fallback).
+        proxy_names.clone()
+    } else {
+        service_names_filtered
+    };
+    // FirstByte-before-Timeweb for Hostodo USA paths inside Auto.
+    let service_names = prioritize_hostodo_firstbyte(&service_names_for_auto);
+    let geo_members = geo_selector_members(&proxy_names);
+    let mut selector_members = vec!["proxy-auto".to_string()];
+    selector_members.extend(geo_members);
 
     let cache_path = data_dir().join("cache.db");
 
@@ -1120,31 +1242,25 @@ fn build_config_from_server(
     });
 
     if let Some(arr) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) {
-        // Default URLTest group — probe a reliably-unrestricted endpoint.
-        // "proxy" is the name the UI looks for (App.tsx :141). All user-facing
-        // "Auto Select" logic binds here. Other groups below are routing-only.
-        // tolerance=200: don't flap between exits for small latency differences
-        // (183ms proxy-moscow vs 233ms netcup-grpc = 50ms diff, both fine).
-        // Higher tolerance → more stable connection, less TSPU attention from
-        // repeated TLS handshakes to different servers.
-        //
-        // v2.3.4 defense-in-depth: use service_names (excludes TCP Reality flow
-        // xtls-rprx-vision) for the GENERAL proxy group too, not just proxy-tg
-        // /proxy-yt. TSPU bulk-blocks sustained traffic on xtls-rprx-vision
-        // after 15-20KB while tiny URLTest probes pass, causing urltest to
-        // pick a broken exit for long streams (persistent WebSocket sessions,
-        // voice/media apps, large downloads). Same bug pattern as field tests
-        // on 2026-04-16 and 2026-04-22. service_names falls back to proxy_names if all
-        // exits are Reality (non-RF users with a single TCP Reality exit still
-        // work as before). Server-side mirror landed in template v81.
-        //
-        // Do not interrupt existing connections on URLTest switch: field
-        // reports from RF users show call/stream drops at the same cadence as
-        // probe-driven switches. Stale exits are handled by bounded probes and
-        // idle recovery, not by tearing down active flows.
+        // Outer selector — sticky manual pin via Clash API. Default stays
+        // proxy-auto so unpinned behaviour matches today's urltest Auto.
+        // route.final + dns-proxy.detour bind to this tag ("proxy").
+        arr.push(serde_json::json!({
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": selector_members,
+            "default": "proxy-auto"
+        }));
+
+        // Auto URLTest — same probe semantics as the former tag=proxy urltest.
+        // tolerance=200: don't flap between exits for small latency differences.
+        // v2.3.4: service_names excludes TCP Reality (xtls-rprx-vision) when
+        // safer exits exist; falls back to all leaves if every exit is Reality.
+        // interrupt_exist_connections=false — probe switches must not tear down
+        // active calls/streams (v2.5.2 / RF field reports).
         arr.push(serde_json::json!({
             "type": "urltest",
-            "tag": "proxy",
+            "tag": "proxy-auto",
             "outbounds": service_names.clone(),
             "url": "https://www.cloudflare.com/cdn-cgi/trace",
             "interval": "60s",
@@ -1152,10 +1268,8 @@ fn build_config_from_server(
             "idle_timeout": "30m",
             "interrupt_exist_connections": false
         }));
-        // Destination-specific URLTest groups — the probe URL is the actual
-        // service, so an exit that can't reach it is dropped from the group.
-        // Uses service_names (excludes TCP Reality) instead of proxy_names.
-        // interval=60s (not 30s) — less probe traffic, less TSPU exposure.
+        // Destination-specific URLTest groups — independent of the selector pin
+        // so Telegram/YouTube keep their own health probes.
         arr.push(serde_json::json!({
             "type": "urltest",
             "tag": "proxy-tg",
@@ -1185,6 +1299,10 @@ fn build_config_from_server(
         // Standard outbounds.
         arr.push(serde_json::json!({"type": "direct", "tag": "direct"}));
         arr.push(serde_json::json!({"type": "block", "tag": "block"}));
+    }
+
+    if matches!(mode, InboundMode::Tun) {
+        ensure_dns_hijack_route_rule(&mut config);
     }
 
     log::info!(
@@ -1293,8 +1411,8 @@ mod tests {
                 tags
             );
         }
-        // Required tags present — three URLTest groups + direct/block + the VLESS outbound.
-        for required in &["proxy", "proxy-tg", "proxy-yt", "direct", "block"] {
+        // Required tags: selector proxy + three URLTest groups + direct/block + VLESS.
+        for required in &["proxy", "proxy-auto", "proxy-tg", "proxy-yt", "direct", "block"] {
             assert!(
                 tags.contains(&required.to_string()),
                 "missing required tag {:?}, got={:?}",
@@ -1306,6 +1424,20 @@ mod tests {
             tags.iter().any(|t| t == "user-1"),
             "missing vless outbound 'user-1', tags={:?}",
             tags
+        );
+
+        let proxy = outbounds
+            .iter()
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy"))
+            .expect("proxy selector");
+        assert_eq!(
+            proxy.get("type").and_then(|t| t.as_str()),
+            Some("selector"),
+            "proxy must be a selector wrapping proxy-auto"
+        );
+        assert_eq!(
+            proxy.get("default").and_then(|t| t.as_str()),
+            Some("proxy-auto")
         );
 
         // Each urltest group must reference the vless outbound, not itself.
@@ -1322,7 +1454,7 @@ mod tests {
         assert_eq!(
             urltest_tags,
             vec![
-                "proxy".to_string(),
+                "proxy-auto".to_string(),
                 "proxy-tg".to_string(),
                 "proxy-yt".to_string()
             ],
@@ -1424,6 +1556,54 @@ mod tests {
         }
     }
 
+    /// TUN must hijack client DNS into sing-box's DNS module. Without this,
+    /// macOS browsers keep using poisoned/local ISP resolvers
+    /// (DNS_PROBE_FINISHED_NXDOMAIN on LinkedIn) while System Proxy works.
+    /// See notes/lumen_ekaterina_macos_system_proxy_working_tun_dns_fail_2026-07-31.md.
+    #[test]
+    fn tun_route_hijacks_dns_to_singbox_module() {
+        let raw = "vless://00000000-0000-4000-8000-000000000005@192.0.2.50:443?type=tcp&security=reality&pbk=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE&fp=chrome&sni=google.com&sid=feedface&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
+        let rules = cfg["route"]["rules"]
+            .as_array()
+            .expect("route.rules");
+        let first = rules.first().expect("at least one route rule");
+        assert_eq!(
+            first.get("protocol").and_then(|p| p.as_str()),
+            Some("dns"),
+            "first route rule must match DNS protocol"
+        );
+        assert_eq!(
+            first.get("action").and_then(|a| a.as_str()),
+            Some("hijack-dns"),
+            "first route rule must hijack DNS into sing-box DNS module"
+        );
+
+        // Full-config path (server returns dns+inbounds+route) must still
+        // receive the hijack when the client swaps in TUN inbound.
+        let mut full = serde_json::json!({
+            "dns": {"final": "dns-proxy"},
+            "inbounds": [{"type": "mixed", "listen_port": 10808}],
+            "route": {
+                "rules": [
+                    {"domain_suffix": [".example.com"], "outbound": "direct"}
+                ],
+                "final": "direct"
+            },
+            "outbounds": [{"type": "direct", "tag": "direct"}]
+        });
+        enforce_requested_inbound(&mut full, InboundMode::Tun);
+        let full_first = full["route"]["rules"]
+            .as_array()
+            .and_then(|a| a.first())
+            .expect("full config route.rules[0]");
+        assert_eq!(
+            full_first.get("action").and_then(|a| a.as_str()),
+            Some("hijack-dns")
+        );
+    }
+
     /// Smart-routing contract: Telegram and YouTube destinations must be
     /// routed to their dedicated health-probed groups, not the default.
     #[test]
@@ -1522,17 +1702,17 @@ mod tests {
             "proxy-yt probe must target youtube.com, got {:?}",
             by_tag.get("proxy-yt")
         );
-        // Default group — avoid gstatic which sometimes is regional-blocked
+        // Auto group — avoid gstatic which sometimes is regional-blocked
         // and is what the v2.2.4 bug-probe happened to be using.
-        let default_probe = by_tag.get("proxy").cloned().unwrap_or_default();
+        let default_probe = by_tag.get("proxy-auto").cloned().unwrap_or_default();
         assert!(
             !default_probe.contains("gstatic.com"),
-            "default proxy group should not probe gstatic (regional-block risk), got {:?}",
+            "proxy-auto should not probe gstatic (regional-block risk), got {:?}",
             default_probe
         );
         assert!(
             !default_probe.is_empty(),
-            "default proxy group has no probe URL"
+            "proxy-auto group has no probe URL"
         );
     }
 
@@ -1568,7 +1748,7 @@ mod tests {
         );
     }
 
-    /// v2.3.4 regression: the general `proxy` urltest group must ALSO exclude
+    /// v2.3.4 regression: Auto urltest `proxy-auto` must ALSO exclude
     /// TCP Reality exits (flow=xtls-rprx-vision), not only proxy-tg/proxy-yt.
     /// TSPU bulk-blocks sustained traffic on xtls-rprx-vision after 15-20KB
     /// while tiny URLTest probes pass → urltest picks a broken exit for long
@@ -1580,7 +1760,7 @@ mod tests {
     #[test]
     fn general_proxy_group_excludes_tcp_reality_when_alternatives_exist() {
         // Synthetic server payload: one TCP Reality exit (flow=xtls-rprx-vision)
-        // + one gRPC Reality exit (no xtls flow). General `proxy` group must
+        // + one gRPC Reality exit (no xtls flow). Auto `proxy-auto` must
         // pick only the gRPC one.
         let server = serde_json::json!({
             "outbounds": [
@@ -1603,11 +1783,11 @@ mod tests {
         });
         let cfg = build_config_from_server(&server, InboundMode::Tun).expect("build");
         let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
-        let proxy = outbounds
+        let proxy_auto = outbounds
             .iter()
-            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy"))
-            .expect("proxy urltest group");
-        let members: Vec<&str> = proxy
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy-auto"))
+            .expect("proxy-auto urltest group");
+        let members: Vec<&str> = proxy_auto
             .get("outbounds")
             .and_then(|o| o.as_array())
             .unwrap()
@@ -1616,7 +1796,7 @@ mod tests {
             .collect();
         assert!(
             !members.contains(&"tcp-reality-1"),
-            "general `proxy` group must NOT include TCP Reality (xtls-rprx-vision) \
+            "Auto `proxy-auto` must NOT include TCP Reality (xtls-rprx-vision) \
              when safer exits exist. Got members: {:?}. This protects RU users from \
              TSPU bulk-block on long streams (persistent WebSocket sessions, \
              voice/media apps, large downloads).",
@@ -1624,16 +1804,16 @@ mod tests {
         );
         assert!(
             members.contains(&"grpc-reality-1"),
-            "general `proxy` group must include the safe gRPC Reality exit, \
+            "Auto `proxy-auto` must include the safe gRPC Reality exit, \
              got members: {:?}",
             members
         );
     }
 
     /// v2.3.4: when ALL exits are TCP Reality (non-RF user, single Reality
-    /// origin), the general `proxy` group MUST fall back to including them.
+    /// origin), Auto `proxy-auto` MUST fall back to including them.
     /// An empty urltest group is worse than a TSPU-vulnerable one — it breaks
-    /// the UI entirely (App.tsx binds "Auto Select" to this group name).
+    /// the UI entirely (App.tsx binds "Auto Select" to proxy / proxy-auto).
     #[test]
     fn general_proxy_group_falls_back_to_tcp_reality_if_only_option() {
         let server = serde_json::json!({
@@ -1650,11 +1830,11 @@ mod tests {
         });
         let cfg = build_config_from_server(&server, InboundMode::Tun).expect("build");
         let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
-        let proxy = outbounds
+        let proxy_auto = outbounds
             .iter()
-            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy"))
-            .expect("proxy urltest group");
-        let members: Vec<&str> = proxy
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy-auto"))
+            .expect("proxy-auto urltest group");
+        let members: Vec<&str> = proxy_auto
             .get("outbounds")
             .and_then(|o| o.as_array())
             .unwrap()
@@ -1664,9 +1844,273 @@ mod tests {
         assert_eq!(
             members,
             vec!["only-tcp-reality"],
-            "general `proxy` group must fall back to the TCP Reality exit when \
+            "Auto `proxy-auto` must fall back to the TCP Reality exit when \
              no safer alternatives exist (non-RF user with single Reality origin)"
         );
+    }
+
+    /// Geo picker: outer `proxy` is a selector defaulting to `proxy-auto`.
+    /// Manual USA pin is FirstByte-only; Vision residentials are selectable
+    /// but never members of Auto urltest when safer exits exist.
+    #[test]
+    fn proxy_selector_wraps_auto_and_geo_leaves() {
+        let server = serde_json::json!({
+            "outbounds": [
+                {
+                    "type": "vless",
+                    "tag": "hostodo-via-timeweb",
+                    "server": "192.0.2.40",
+                    "server_port": 36748,
+                    "uuid": "00000000-0000-4000-8000-000000000010"
+                },
+                {
+                    "type": "vless",
+                    "tag": "hostodo-via-firstbyte",
+                    "server": "192.0.2.41",
+                    "server_port": 36748,
+                    "uuid": "00000000-0000-4000-8000-000000000011"
+                },
+                {
+                    "type": "vless",
+                    "tag": "relay-eu-443",
+                    "server": "192.0.2.42",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000012"
+                },
+                {
+                    "type": "vless",
+                    "tag": "dubai-residential",
+                    "server": "192.0.2.43",
+                    "server_port": 36754,
+                    "uuid": "00000000-0000-4000-8000-000000000013",
+                    "flow": "xtls-rprx-vision"
+                },
+                {
+                    "type": "vless",
+                    "tag": "izhevsk-via-firstbyte",
+                    "server": "192.0.2.44",
+                    "server_port": 36755,
+                    "uuid": "00000000-0000-4000-8000-000000000014",
+                    "flow": "xtls-rprx-vision"
+                },
+                {
+                    "type": "vless",
+                    "tag": "firstbyte-moscow-reality",
+                    "server": "192.0.2.45",
+                    "server_port": 36746,
+                    "uuid": "00000000-0000-4000-8000-000000000015",
+                    "flow": "xtls-rprx-vision"
+                },
+                {
+                    "type": "vless",
+                    "tag": "proxy-moscow",
+                    "server": "192.0.2.46",
+                    "server_port": 36743,
+                    "uuid": "00000000-0000-4000-8000-000000000016"
+                }
+            ]
+        });
+        let cfg = build_config_from_server(&server, InboundMode::Tun).expect("build");
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+
+        let proxy = outbounds
+            .iter()
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy"))
+            .expect("proxy selector");
+        assert_eq!(proxy.get("type").and_then(|t| t.as_str()), Some("selector"));
+        assert_eq!(
+            proxy.get("default").and_then(|t| t.as_str()),
+            Some("proxy-auto")
+        );
+        let sel: Vec<&str> = proxy
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            sel,
+            vec![
+                "proxy-auto",
+                "hostodo-via-firstbyte",
+                "relay-eu-443",
+                "dubai-residential",
+                "izhevsk-via-firstbyte",
+                "firstbyte-moscow-reality",
+                "proxy-moscow",
+            ],
+            "selector members must be Auto + geo pins; USA pin is FirstByte only \
+             (no hostodo-via-timeweb). Got {:?}",
+            sel
+        );
+
+        let proxy_auto = outbounds
+            .iter()
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy-auto"))
+            .expect("proxy-auto");
+        let auto_members: Vec<&str> = proxy_auto
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            !auto_members.contains(&"dubai-residential"),
+            "Auto must not include Vision residential dubai"
+        );
+        assert!(
+            !auto_members.contains(&"izhevsk-via-firstbyte"),
+            "Auto must not include Vision residential izhevsk"
+        );
+        assert!(
+            !auto_members.contains(&"firstbyte-moscow-reality"),
+            "Auto must not include moscow FirstByte (manual-only geo)"
+        );
+        assert!(
+            !auto_members.contains(&"proxy-moscow"),
+            "Auto must not include Timeweb moscow exit (manual-only geo)"
+        );
+        let fb = auto_members
+            .iter()
+            .position(|m| *m == "hostodo-via-firstbyte")
+            .expect("firstbyte hostodo in Auto");
+        let tw = auto_members
+            .iter()
+            .position(|m| *m == "hostodo-via-timeweb")
+            .expect("timeweb hostodo in Auto");
+        assert!(
+            fb < tw,
+            "Auto must list hostodo-via-firstbyte before hostodo-via-timeweb, got {:?}",
+            auto_members
+        );
+
+        // TG/YT stay independent urltests (not redirected to selector pin).
+        for tag in ["proxy-tg", "proxy-yt"] {
+            let g = outbounds
+                .iter()
+                .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some(tag))
+                .unwrap_or_else(|| panic!("missing {tag}"));
+            assert_eq!(g.get("type").and_then(|t| t.as_str()), Some("urltest"));
+        }
+    }
+
+    #[test]
+    fn prioritize_hostodo_firstbyte_swaps_only_those_two() {
+        let input = vec![
+            "relay-eu-443".into(),
+            "hostodo-via-timeweb".into(),
+            "firstbyte-relay-httpupgrade".into(),
+            "hostodo-via-firstbyte".into(),
+        ];
+        assert_eq!(
+            prioritize_hostodo_firstbyte(&input),
+            vec![
+                "relay-eu-443".to_string(),
+                "hostodo-via-firstbyte".to_string(),
+                "firstbyte-relay-httpupgrade".to_string(),
+                "hostodo-via-timeweb".to_string(),
+            ]
+        );
+    }
+
+    /// Opt-in live proof: `LUMEN_LIVE_OUTBOUNDS_PATH=/tmp/lumen-live.json cargo test …`
+    /// where the JSON is `{ "outbounds": [ …vless leaves… ] }` from the config gateway.
+    #[test]
+    fn live_worker_payload_builds_safe_autoroute_shape() {
+        let path = match std::env::var("LUMEN_LIVE_OUTBOUNDS_PATH") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                eprintln!("skip: set LUMEN_LIVE_OUTBOUNDS_PATH for live worker proof");
+                return;
+            }
+        };
+        let raw = std::fs::read_to_string(&path).expect("read live outbounds");
+        let server: serde_json::Value = serde_json::from_str(&raw).expect("parse live json");
+        let cfg = build_config_from_server(&server, InboundMode::Tun).expect("build live");
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+        let by_tag = |tag: &str| {
+            outbounds
+                .iter()
+                .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some(tag))
+                .unwrap_or_else(|| panic!("missing {tag}"))
+        };
+
+        let proxy = by_tag("proxy");
+        assert_eq!(proxy.get("type").and_then(|t| t.as_str()), Some("selector"));
+        assert_eq!(
+            proxy.get("default").and_then(|t| t.as_str()),
+            Some("proxy-auto")
+        );
+        let sel: Vec<&str> = proxy
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(sel.first().copied(), Some("proxy-auto"));
+        assert!(
+            sel.contains(&"hostodo-via-firstbyte"),
+            "USA FirstByte pin must be selectable: {:?}",
+            sel
+        );
+        assert!(
+            !sel.contains(&"hostodo-via-timeweb"),
+            "USA Timeweb must NOT be a Home pin member: {:?}",
+            sel
+        );
+
+        let auto = by_tag("proxy-auto");
+        assert_eq!(auto.get("type").and_then(|t| t.as_str()), Some("urltest"));
+        assert_eq!(
+            auto.get("interrupt_exist_connections")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let auto_members: Vec<&str> = auto
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for banned in [
+            "dubai-residential",
+            "izhevsk-via-firstbyte",
+            "firstbyte-moscow-reality",
+            "proxy-moscow",
+        ] {
+            assert!(
+                !auto_members.contains(&banned),
+                "Auto leaked manual-only geo {banned}: {:?}",
+                auto_members
+            );
+        }
+        if auto_members.contains(&"hostodo-via-firstbyte")
+            && auto_members.contains(&"hostodo-via-timeweb")
+        {
+            let fb = auto_members
+                .iter()
+                .position(|m| *m == "hostodo-via-firstbyte")
+                .unwrap();
+            let tw = auto_members
+                .iter()
+                .position(|m| *m == "hostodo-via-timeweb")
+                .unwrap();
+            assert!(fb < tw, "FirstByte before Timeweb in Auto: {:?}", auto_members);
+        }
+
+        for tag in ["proxy-tg", "proxy-yt"] {
+            let g = by_tag(tag);
+            assert_eq!(g.get("type").and_then(|t| t.as_str()), Some("urltest"));
+            assert_eq!(
+                g.get("interrupt_exist_connections")
+                    .and_then(|v| v.as_bool()),
+                Some(false)
+            );
+        }
     }
 
     /// v2.5.2: URLTest groups must not force-teardown active flows on probe

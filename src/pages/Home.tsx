@@ -1,19 +1,35 @@
+import { useState } from "react";
 import ConnectButton from "../components/ConnectButton";
 import LumenLogo from "../components/LumenLogo";
 import { latencyState, latencyColor } from "../lib/latency";
+import {
+  availableLocations,
+  locationFlag,
+  locationLabel,
+  type LocationOption,
+} from "../lib/locations";
 import "./Home.css";
 
 type ConnectionState = "disconnected" | "connecting" | "connected";
 
+interface ProxyNode {
+  name: string;
+  type: string;
+  alive: boolean;
+  delay: number;
+}
+
 interface Props {
   connectionState: ConnectionState;
   currentServer: string;
-  currentFlag: string;
   latency: number;
   uploadSpeed: number;
   downloadSpeed: number;
   connectionTime: number;
   onConnect: () => void;
+  /** Nodes from Clash selector group `proxy` (includes proxy-auto + geo). */
+  locationNodes?: ProxyNode[];
+  onSelectLocation?: (tag: string) => void;
   errorMsg?: string;
 }
 
@@ -43,76 +59,140 @@ const statusLabels: Record<ConnectionState, string> = {
 export default function Home({
   connectionState,
   currentServer,
-  currentFlag,
   latency,
   uploadSpeed,
   downloadSpeed,
   connectionTime,
   onConnect,
+  locationNodes,
+  onSelectLocation,
   errorMsg,
 }: Props) {
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const locations: LocationOption[] = availableLocations(locationNodes);
+  const displayFlag = locationFlag(currentServer);
+  const displayName = locationLabel(currentServer);
+  const canPick = Boolean(onSelectLocation) && locations.length > 1;
+
+  function handlePick(tag: string) {
+    onSelectLocation?.(tag);
+    setSheetOpen(false);
+  }
+
   return (
     <div className="home">
-      {/* Logo */}
       <LumenLogo size={32} className="home__logo" />
 
-      {/* Server info */}
-      <div className="home__server">
-        <span className="home__flag">{currentFlag}</span>
-        <span className="home__server-name">{currentServer}</span>
-        {connectionState === "connected" && (() => {
-          // Pending state shows faint "—" instead of nothing — gives the
-          // user a clear "we know about this row, just no measurement yet"
-          // signal instead of layout that jumps when the test arrives.
-          const state = latencyState({
-            ms: latency > 0 ? latency : null,
-          });
-          return (
-            <span
-              className="home__latency"
-              style={{ color: latencyColor(state) }}
-              aria-live="polite"
-            >
-              {state === "pending" ? "—" : `${latency}ms`}
-            </span>
-          );
-        })()}
-      </div>
+      <button
+        type="button"
+        className={`home__server${canPick ? " home__server--interactive" : ""}`}
+        onClick={() => canPick && setSheetOpen(true)}
+        disabled={!canPick}
+        aria-haspopup="dialog"
+        aria-expanded={sheetOpen}
+      >
+        <span className="home__flag">{displayFlag}</span>
+        <span className="home__server-name">{displayName}</span>
+        {connectionState === "connected" &&
+          (() => {
+            const state = latencyState({
+              ms: latency > 0 ? latency : null,
+            });
+            return (
+              <span
+                className="home__latency"
+                style={{ color: latencyColor(state) }}
+                aria-live="polite"
+              >
+                {state === "pending" ? "—" : `${latency}ms`}
+              </span>
+            );
+          })()}
+        {canPick && <span className="home__server-chevron" aria-hidden>▾</span>}
+      </button>
 
-      {/* Connect button */}
       <div className="home__button-area">
         <ConnectButton state={connectionState} onClick={onConnect} />
       </div>
 
-      {/* Status */}
       <div className={`home__status home__status--${connectionState}`}>
         {statusLabels[connectionState]}
       </div>
 
-      {/* Connection time */}
       {connectionState === "connected" && connectionTime > 0 && (
         <div className="home__time">{formatTime(connectionTime)}</div>
       )}
 
-      {/* Error message */}
-      {errorMsg && (
-        <div className="home__error">{errorMsg}</div>
-      )}
+      {errorMsg && <div className="home__error">{errorMsg}</div>}
 
-      {/* Speed indicators */}
-      <div className={`home__speed ${connectionState === "connected" ? "visible" : ""}`}>
+      <div
+        className={`home__speed ${connectionState === "connected" ? "visible" : ""}`}
+      >
         <div className="home__speed-item">
           <span className="home__speed-arrow">↑</span>
-          <span className="home__speed-value">{formatSpeed(uploadSpeed).value}</span>
-          <span className="home__speed-unit">{formatSpeed(uploadSpeed).unit}</span>
+          <span className="home__speed-value">
+            {formatSpeed(uploadSpeed).value}
+          </span>
+          <span className="home__speed-unit">
+            {formatSpeed(uploadSpeed).unit}
+          </span>
         </div>
         <div className="home__speed-divider" />
         <div className="home__speed-item">
           <span className="home__speed-arrow">↓</span>
-          <span className="home__speed-value">{formatSpeed(downloadSpeed).value}</span>
-          <span className="home__speed-unit">{formatSpeed(downloadSpeed).unit}</span>
+          <span className="home__speed-value">
+            {formatSpeed(downloadSpeed).value}
+          </span>
+          <span className="home__speed-unit">
+            {formatSpeed(downloadSpeed).unit}
+          </span>
         </div>
       </div>
+
+      {sheetOpen && (
+        <div
+          className="home__sheet-backdrop"
+          role="presentation"
+          onClick={() => setSheetOpen(false)}
+        >
+          <div
+            className="home__sheet"
+            role="dialog"
+            aria-label="Choose location"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="home__sheet-handle" />
+            <h2 className="home__sheet-title">Location</h2>
+            <ul className="home__sheet-list">
+              {locations.map((loc) => {
+                const active = currentServer === loc.tag;
+                const node = locationNodes?.find((n) => n.name === loc.tag);
+                const ms = node && node.delay > 0 ? node.delay : null;
+                return (
+                  <li key={loc.tag}>
+                    <button
+                      type="button"
+                      className={`home__sheet-row${active ? " active" : ""}`}
+                      onClick={() => handlePick(loc.tag)}
+                    >
+                      <span className="home__sheet-flag">{loc.flag}</span>
+                      <span className="home__sheet-label">{loc.label}</span>
+                      {ms != null && (
+                        <span className="home__sheet-delay">{ms}ms</span>
+                      )}
+                      {active && (
+                        <span className="home__sheet-check" aria-label="Selected">
+                          ✓
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

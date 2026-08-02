@@ -29,6 +29,8 @@ export interface NetworkDiagnosticsLike {
   region: string | null;
   country: string | null;
   asn_org: string | null;
+  probe_source?: string | null;
+  probe_via?: string | null;
   error: string | null;
 }
 
@@ -38,17 +40,46 @@ export function transportFromEffectiveStatus(status: string): ActiveTransport {
   return null;
 }
 
+/**
+ * Decide which runtimes to tear down on Disconnect / mode-switch.
+ *
+ * Always stop BOTH planes. Two 2026-08-02 reconnect-loop failure modes:
+ * 1) preferredTun diverted teardown to tunDisconnect-only while System Proxy
+ *    kept running → get_effective_status snapped UI back to Connected.
+ * 2) proxy is_running matched helper TUN (`sing-box run` on config-tun.json)
+ *    → UI thought transport was System Proxy while TUN was up → power tap
+ *    hot-swapped (Stop+Start) instead of disconnecting.
+ */
+export function planSessionTeardown(
+  _activeTransport: ActiveTransport,
+  _tunStatus: TunStatusLike | null
+): { stopProxy: boolean; stopTun: boolean } {
+  // Always stop both planes. Leaving either up after Disconnect / mode-switch
+  // made get_effective_status snap the UI back to Connected (or hot-swap).
+  // stop() / tunDisconnect are cheap no-ops when already down.
+  void _activeTransport;
+  void _tunStatus;
+  return { stopProxy: true, stopTun: true };
+}
+
+/** @deprecated Prefer planSessionTeardown — preferredTun is ignored. */
 export function shouldStopTunOnDisconnect(
   activeTransport: ActiveTransport,
-  preferredTun: boolean,
+  _preferredTun: boolean,
   tunStatus: TunStatusLike | null
 ): boolean {
-  return (
-    activeTransport === "tun" ||
-    activeTransport === "wbstream" ||
-    preferredTun ||
-    !!tunStatus?.singbox_running
-  );
+  return planSessionTeardown(activeTransport, tunStatus).stopTun;
+}
+
+/** True when power-button should hot-swap to the preferred mode instead of disconnect. */
+export function shouldSwitchModeOnPowerTap(
+  connectionState: ConnectionState,
+  activeTransport: ActiveTransport,
+  preferredTun: boolean
+): boolean {
+  if (connectionState !== "connected" || !activeTransport) return false;
+  const activeIsTun = activeTransport === "tun" || activeTransport === "wbstream";
+  return preferredTun !== activeIsTun;
 }
 
 export function readStoredConnectionIntent(value: string | null): StoredConnectionIntent {
@@ -61,6 +92,34 @@ export function shouldSelfHealOnLaunch(
   activeTransport: ActiveTransport
 ): boolean {
   return storedIntent === "disconnected" && activeTransport !== null;
+}
+
+/**
+ * How the 5s get_effective_status poll may update React state.
+ *
+ * - skip: connect / mode-switch / error UI owns the state
+ * - force_disconnected: user intent is off — never snap back to Connected
+ *   while teardown is finishing (2026-08-02: 2s "reconnect" flash)
+ * - apply: mirror the runtime
+ */
+export type EffectiveStatusSyncAction = "skip" | "force_disconnected" | "apply";
+
+export function shouldApplyEffectiveStatusSync(opts: {
+  connectionState: ConnectionState;
+  connectInFlight: boolean;
+  storedIntent: StoredConnectionIntent;
+}): EffectiveStatusSyncAction {
+  if (opts.connectInFlight) return "skip";
+  if (opts.connectionState === "connecting" || opts.connectionState === "error") {
+    return "skip";
+  }
+  if (opts.storedIntent === "disconnected") return "force_disconnected";
+  return "apply";
+}
+
+/** Power button while Connected always disconnects — mode hot-swap is Settings-only. */
+export function shouldDisconnectOnPowerTap(connectionState: ConnectionState): boolean {
+  return connectionState === "connected";
 }
 
 export function repairNetworkMessage(result: RepairNetworkResultLike): string {
@@ -115,6 +174,7 @@ export function formatDiagnosticsSnapshot(
     `External IP: ${diagnostics.external_ip ?? "Unknown"}`,
     `Location: ${diagnosticLocationLabel(diagnostics)}`,
     `Provider: ${diagnostics.asn_org ?? "Unknown"}`,
+    `Probe: ${diagnostics.probe_source ?? "Unknown"} via ${diagnostics.probe_via ?? "Unknown"}`,
     `Helper: ${diagnostics.helper_running ? "Running" : diagnostics.helper_installed ? "Installed" : "Not installed"}`,
     `TUN: ${diagnostics.tun_running ? "Running" : "Stopped"}`,
   ];

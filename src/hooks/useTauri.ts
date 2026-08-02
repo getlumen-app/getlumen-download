@@ -47,6 +47,8 @@ export interface NetworkDiagnostics {
   region: string | null;
   country: string | null;
   asn_org: string | null;
+  probe_source?: string | null;
+  probe_via?: string | null;
   error: string | null;
 }
 
@@ -96,6 +98,8 @@ export async function networkDiagnostics(): Promise<NetworkDiagnostics> {
       region: null,
       country: null,
       asn_org: null,
+      probe_source: null,
+      probe_via: null,
       error: null,
     };
   }

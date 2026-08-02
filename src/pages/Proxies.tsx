@@ -6,6 +6,11 @@ import {
   latencyDisplay,
   type LatencyState,
 } from "../lib/latency";
+import {
+  GROUP_LABELS,
+  locationFlag,
+  locationLabel,
+} from "../lib/locations";
 import "./Proxies.css";
 
 interface ProxyNode {
@@ -29,37 +34,6 @@ interface Props {
   /** Fires when a TCP-RTT test result arrives for `name`. App propagates to Home. */
   onDelayMeasured?: (name: string, ms: number) => void;
 }
-
-const SERVER_FLAGS: Record<string, string> = {
-  "relay-eu-443": "🇷🇺→🇩🇪",
-  "relay-eu-httpupgrade": "🇷🇺→🇩🇪",
-  "relay-eu-grpc": "🇷🇺→🇩🇪",
-  "relay-moscow-httpupgrade": "🇷🇺→🇩🇪",
-  "vless-cdn-ws": "🌐",
-  "vless-cdn-grpc": "🌐",
-  "netcup-tcp-reality": "🇩🇪",
-  "netcup-grpc-reality": "🇩🇪",
-  "proxy-moscow": "🇷🇺",
-};
-
-const SERVER_LABELS: Record<string, string> = {
-  "relay-eu-443": "Port 443 Relay",
-  "relay-eu-httpupgrade": "Moscow HTTPUpgrade",
-  "relay-eu-grpc": "Moscow gRPC Relay",
-  "relay-moscow-httpupgrade": "Moscow Relay",
-  "vless-cdn-ws": "CDN WebSocket",
-  "vless-cdn-grpc": "CDN gRPC",
-  "netcup-tcp-reality": "Frankfurt Direct",
-  "netcup-grpc-reality": "Frankfurt gRPC",
-  "proxy-moscow": "Moscow Exit",
-};
-
-const GROUP_LABELS: Record<string, string> = {
-  "proxy-auto": "Auto Select",
-  "proxy-moscow": "Russian Exit",
-  "messenger-auto": "Messengers",
-  "ru-smart": "RU Smart",
-};
 
 /** Inline spinner — cyan, 12px, 1s rotation. SVG matches Lumen icon style. */
 function DelaySpinner() {
@@ -205,10 +179,10 @@ export default function Proxies({ groups, onSelectProxy, onDelayMeasured }: Prop
                     >
                       <span className="proxy-node__active-dot" />
                       <span className="proxy-node__flag">
-                        {SERVER_FLAGS[node.name] || "🌍"}
+                        {locationFlag(node.name)}
                       </span>
                       <span className="proxy-node__name">
-                        {SERVER_LABELS[node.name] || node.name}
+                        {locationLabel(node.name)}
                       </span>
                       <span
                         className={`proxy-node__delay ${latencyClassName(state)}`}

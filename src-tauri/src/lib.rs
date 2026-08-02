@@ -2,8 +2,10 @@ mod clash_api;
 mod bootstrap;
 mod config;
 mod health_monitor;
+mod ip_diagnostics;
 mod proxy;
 mod singbox;
+pub use singbox::cmdline_is_proxy_singbox;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod tun_commands;
 #[cfg(target_os = "macos")]
@@ -45,6 +47,10 @@ struct NetworkDiagnostics {
     region: Option<String>,
     country: Option<String>,
     asn_org: Option<String>,
+    /// Which probe succeeded (cloudflare-trace / ipwho.is / …).
+    probe_source: Option<String>,
+    /// `local-proxy` when System Proxy mode forces 127.0.0.1:10808; else `direct-socket`.
+    probe_via: Option<String>,
     error: Option<String>,
 }
 
@@ -430,10 +436,9 @@ async fn get_status(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn get_effective_status(state: State<'_, AppState>) -> Result<String, String> {
-    if state.singbox.lock().unwrap().is_running() {
-        return Ok("connected-proxy".to_string());
-    }
-
+    // Prefer helper TUN when its sing-box is up. Proxy is_running used to match
+    // ANY `sing-box run` (including TUN), which lied as connected-proxy and made
+    // the UI hot-swap on every power tap (Stop→Start loop, 2026-08-02).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         if let Ok(status) = tun_commands::tun_status().await {
@@ -443,36 +448,17 @@ async fn get_effective_status(state: State<'_, AppState>) -> Result<String, Stri
         }
     }
 
-    Ok("disconnected".to_string())
-}
-
-async fn fetch_external_ip_snapshot() -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(4))
-        .user_agent(concat!("Lumen/", env!("CARGO_PKG_VERSION"), " diagnostics"))
-        .build()
-        .map_err(|e| format!("diagnostics client: {}", e))?;
-
-    let response = client
-        .get("https://ifconfig.co/json")
-        .send()
-        .await
-        .map_err(|e| format!("external ip: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("external ip status: {}", response.status()));
+    if state.singbox.lock().unwrap().is_running() {
+        return Ok("connected-proxy".to_string());
     }
 
-    response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("external ip parse: {}", e))
+    Ok("disconnected".to_string())
 }
 
 #[tauri::command]
 async fn network_diagnostics(state: State<'_, AppState>) -> Result<NetworkDiagnostics, String> {
     let effective_status = get_effective_status(state).await?;
+    let route = ip_diagnostics::DiagnosticsRoute::from_effective_status(&effective_status);
     let mut diagnostics = NetworkDiagnostics {
         effective_status,
         helper_installed: false,
@@ -482,6 +468,8 @@ async fn network_diagnostics(state: State<'_, AppState>) -> Result<NetworkDiagno
         region: None,
         country: None,
         asn_org: None,
+        probe_source: None,
+        probe_via: Some(route.label().to_string()),
         error: None,
     };
 
@@ -494,24 +482,13 @@ async fn network_diagnostics(state: State<'_, AppState>) -> Result<NetworkDiagno
         }
     }
 
-    match fetch_external_ip_snapshot().await {
+    match ip_diagnostics::fetch_external_ip_snapshot(route).await {
         Ok(snapshot) => {
-            diagnostics.external_ip = snapshot
-                .get("ip")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string);
-            diagnostics.region = snapshot
-                .get("region_name")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string);
-            diagnostics.country = snapshot
-                .get("country")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string);
-            diagnostics.asn_org = snapshot
-                .get("asn_org")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string);
+            diagnostics.external_ip = Some(snapshot.ip);
+            diagnostics.region = snapshot.region;
+            diagnostics.country = snapshot.country;
+            diagnostics.asn_org = snapshot.asn_org;
+            diagnostics.probe_source = Some(snapshot.source.to_string());
         }
         Err(e) => diagnostics.error = Some(e),
     }
