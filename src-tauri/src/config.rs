@@ -46,18 +46,11 @@ pub fn config_base_url() -> String {
 
 const PROTEUS_CONFIG_FALLBACK_BASE: &str =
     "https://primary-production-1d1cf.up.railway.app/webhook";
-const PROTEUS_CONFIG_CF_WORKER_FALLBACK_BASE: &str = "https://sub.hwai-ops.xyz";
 
-const CONFIG_DNS_PINS: &[(&str, &[&str])] = &[
-    (
-        "config.getlumen.download",
-        &["104.21.75.98:443", "172.67.220.94:443"],
-    ),
-    (
-        "sub.hwai-ops.xyz",
-        &["172.67.206.71:443", "104.21.69.74:443"],
-    ),
-];
+const CONFIG_DNS_PINS: &[(&str, &[&str])] = &[(
+    "config.getlumen.download",
+    &["104.21.75.98:443", "172.67.220.94:443"],
+)];
 
 pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
     let key = sub_key.trim();
@@ -70,11 +63,7 @@ pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
         "{}/proteus-sub?sub={}&format=json-text",
         PROTEUS_CONFIG_FALLBACK_BASE, key
     );
-    let cf_worker_fallback = format!(
-        "{}/proteus-sub?sub={}&format=json-text",
-        PROTEUS_CONFIG_CF_WORKER_FALLBACK_BASE, key
-    );
-    let mut urls = vec![primary, fallback, cf_worker_fallback];
+    let mut urls = vec![primary, fallback];
     urls.dedup();
     urls
 }
@@ -154,12 +143,32 @@ fn tun_inbounds() -> serde_json::Value {
     tun_inbounds_for_target(std::env::consts::OS)
 }
 
+fn mixed_inbounds() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "127.0.0.1",
+            "listen_port": 10808,
+            "sniff": true,
+            "sniff_override_destination": false
+        }
+    ])
+}
+
 fn enforce_requested_inbound(config: &mut serde_json::Value, mode: InboundMode) {
-    if matches!(mode, InboundMode::Tun) {
-        config["inbounds"] = tun_inbounds();
-        // Without DNS hijack, browsers keep the ISP resolver under TUN and
-        // fail with NXDOMAIN while System Proxy still works (Ekaterina 2026-07-31).
-        ensure_dns_hijack_route_rule(config);
+    match mode {
+        InboundMode::Mixed => {
+            // Server full configs may carry a TUN/mobile inbound. System Proxy
+            // mode must always expose the local mixed listener macOS points at.
+            config["inbounds"] = mixed_inbounds();
+        }
+        InboundMode::Tun => {
+            config["inbounds"] = tun_inbounds();
+            // Without DNS hijack, browsers keep the ISP resolver under TUN and
+            // fail with NXDOMAIN while System Proxy still works (Ekaterina 2026-07-31).
+            ensure_dns_hijack_route_rule(config);
+        }
     }
 }
 
@@ -337,11 +346,7 @@ pub async fn fetch_and_cache_first_available_with_mode_via_proxy(
             }
         }
     }
-    Err(format!(
-        "All proxied config endpoints failed: {}",
-        errors.join("; ")
-    )
-    .into())
+    Err(format!("All proxied config endpoints failed: {}", errors.join("; ")).into())
 }
 
 async fn fetch_and_cache_single_with_mode(
@@ -580,8 +585,7 @@ pub async fn prefetch_wbstream_manifest_sidecar() -> Result<(), String> {
 }
 
 /// Embedded RS256 public key for WB Stream room manifests (FirstByte signer).
-const WBSTREAM_MANIFEST_PUBLIC_PEM: &str =
-    include_str!("../keys/wbstream-manifest.pub.pem");
+const WBSTREAM_MANIFEST_PUBLIC_PEM: &str = include_str!("../keys/wbstream-manifest.pub.pem");
 
 fn is_usable_wbstream_manifest(manifest: &serde_json::Value) -> bool {
     if manifest.get("signature_alg").and_then(|v| v.as_str()) != Some("RS256") {
@@ -658,9 +662,7 @@ pub fn verify_wbstream_manifest_signature_with_pem(
 }
 
 /// Full fallback gate: shape + RS256 against embedded key + non-expired valid_until.
-pub fn verify_wbstream_manifest_for_fallback(
-    manifest: &serde_json::Value,
-) -> Result<(), String> {
+pub fn verify_wbstream_manifest_for_fallback(manifest: &serde_json::Value) -> Result<(), String> {
     verify_wbstream_manifest_for_fallback_with_pem(manifest, WBSTREAM_MANIFEST_PUBLIC_PEM)
 }
 
@@ -787,16 +789,7 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
             "strategy": "ipv4_only"
         },
         "inbounds": match mode {
-            InboundMode::Mixed => serde_json::json!([
-                {
-                    "type": "mixed",
-                    "tag": "mixed-in",
-                    "listen": "127.0.0.1",
-                    "listen_port": 10808,
-                    "sniff": true,
-                    "sniff_override_destination": false
-                }
-            ]),
+            InboundMode::Mixed => mixed_inbounds(),
             InboundMode::Tun => tun_inbounds(),
         },
         "outbounds": [
@@ -942,10 +935,12 @@ const GEO_SELECTOR_TAGS: &[&str] = &[
 /// They remain available for manual diagnostics/pins without poisoning Auto.
 const AUTO_EXCLUDED_GEO_TAGS: &[&str] = &[
     "relay-eu-443",
+    "relay-eu-httpupgrade",
     "dubai-residential",
     "izhevsk-via-firstbyte",
     "izhevsk-via-netcup",
     "firstbyte-moscow-reality",
+    "hostodo-via-timeweb",
     "proxy-moscow",
 ];
 
@@ -1190,16 +1185,7 @@ fn build_config_from_server(
             "strategy": "ipv4_only"
         },
         "inbounds": match mode {
-            InboundMode::Mixed => serde_json::json!([
-                {
-                    "type": "mixed",
-                    "tag": "mixed-in",
-                    "listen": "127.0.0.1",
-                    "listen_port": 10808,
-                    "sniff": true,
-                    "sniff_override_destination": false
-                }
-            ]),
+            InboundMode::Mixed => mixed_inbounds(),
             // Do NOT override destination with the sniffed domain. DNS
             // resolution already goes through dns-proxy, and override=true
             // breaks applications that connect to an IP with a decoy SNI.
@@ -1362,6 +1348,22 @@ mod tests {
     }
 
     #[test]
+    fn requested_mixed_mode_replaces_full_server_config_inbound() {
+        let mut config = serde_json::json!({
+            "dns": {},
+            "inbounds": [{"type": "tun", "auto_route": true}],
+            "route": {"rules": [{"protocol": "dns", "action": "hijack-dns"}]},
+            "outbounds": [{"type": "direct", "tag": "direct"}]
+        });
+        enforce_requested_inbound(&mut config, InboundMode::Mixed);
+        let inbound = &config["inbounds"][0];
+        assert_eq!(inbound["type"], "mixed");
+        assert_eq!(inbound["tag"], "mixed-in");
+        assert_eq!(inbound["listen"], "127.0.0.1");
+        assert_eq!(inbound["listen_port"], 10808);
+    }
+
+    #[test]
     fn vless_tag_is_never_reserved() {
         for name in &["proxy", "direct", "block", "PROXY", "Direct", ""] {
             let t = vless_outbound_tag(name);
@@ -1413,7 +1415,14 @@ mod tests {
             );
         }
         // Required tags: selector proxy + three URLTest groups + direct/block + VLESS.
-        for required in &["proxy", "proxy-auto", "proxy-tg", "proxy-yt", "direct", "block"] {
+        for required in &[
+            "proxy",
+            "proxy-auto",
+            "proxy-tg",
+            "proxy-yt",
+            "direct",
+            "block",
+        ] {
             assert!(
                 tags.contains(&required.to_string()),
                 "missing required tag {:?}, got={:?}",
@@ -1566,9 +1575,7 @@ mod tests {
         let raw = "vless://00000000-0000-4000-8000-000000000005@192.0.2.50:443?type=tcp&security=reality&pbk=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE&fp=chrome&sni=google.com&sid=feedface&spx=%2F&flow=xtls-rprx-vision#u";
         let v = crate::vless::parse_vless(raw).expect("parse");
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
-        let rules = cfg["route"]["rules"]
-            .as_array()
-            .expect("route.rules");
+        let rules = cfg["route"]["rules"].as_array().expect("route.rules");
         let first = rules.first().expect("at least one route rule");
         assert_eq!(
             first.get("protocol").and_then(|p| p.as_str()),
@@ -1811,6 +1818,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn general_proxy_group_excludes_field_broken_relay_members_when_alternatives_exist() {
+        let server = serde_json::json!({
+            "outbounds": [
+                {
+                    "type": "vless",
+                    "tag": "relay-eu-httpupgrade",
+                    "server": "192.0.2.10",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000001"
+                },
+                {
+                    "type": "vless",
+                    "tag": "hostodo-via-timeweb",
+                    "server": "192.0.2.20",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000002"
+                },
+                {
+                    "type": "vless",
+                    "tag": "hostodo-via-firstbyte",
+                    "server": "192.0.2.30",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000003"
+                },
+                {
+                    "type": "vless",
+                    "tag": "relay-eu-grpc",
+                    "server": "192.0.2.40",
+                    "server_port": 443,
+                    "uuid": "00000000-0000-4000-8000-000000000004"
+                }
+            ]
+        });
+        let cfg = build_config_from_server(&server, InboundMode::Mixed).expect("build");
+        let outbounds = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+        let proxy_auto = outbounds
+            .iter()
+            .find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("proxy-auto"))
+            .expect("proxy-auto urltest group");
+        let members: Vec<&str> = proxy_auto
+            .get("outbounds")
+            .and_then(|o| o.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            !members.contains(&"relay-eu-httpupgrade"),
+            "Auto must not choose relay-eu-httpupgrade when safer exits exist"
+        );
+        assert!(
+            !members.contains(&"hostodo-via-timeweb"),
+            "Auto must not choose hostodo-via-timeweb when safer exits exist"
+        );
+        assert!(members.contains(&"hostodo-via-firstbyte"));
+        assert!(members.contains(&"relay-eu-grpc"));
+    }
+
     /// v2.3.4: when ALL exits are TCP Reality (non-RF user, single Reality
     /// origin), Auto `proxy-auto` MUST fall back to including them.
     /// An empty urltest group is worse than a TSPU-vulnerable one — it breaks
@@ -1978,17 +2044,14 @@ mod tests {
             !auto_members.contains(&"proxy-moscow"),
             "Auto must not include Timeweb moscow exit (manual-only geo)"
         );
-        let fb = auto_members
-            .iter()
-            .position(|m| *m == "hostodo-via-firstbyte")
-            .expect("firstbyte hostodo in Auto");
-        let tw = auto_members
-            .iter()
-            .position(|m| *m == "hostodo-via-timeweb")
-            .expect("timeweb hostodo in Auto");
         assert!(
-            fb < tw,
-            "Auto must list hostodo-via-firstbyte before hostodo-via-timeweb, got {:?}",
+            auto_members.contains(&"hostodo-via-firstbyte"),
+            "Auto must include Hostodo FirstByte when available, got {:?}",
+            auto_members
+        );
+        assert!(
+            !auto_members.contains(&"hostodo-via-timeweb"),
+            "Auto must not include Hostodo Timeweb after live route health failed, got {:?}",
             auto_members
         );
 
@@ -2083,9 +2146,11 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         for banned in [
+            "relay-eu-httpupgrade",
             "dubai-residential",
             "izhevsk-via-firstbyte",
             "firstbyte-moscow-reality",
+            "hostodo-via-timeweb",
             "proxy-moscow",
         ] {
             assert!(
@@ -2094,20 +2159,6 @@ mod tests {
                 auto_members
             );
         }
-        if auto_members.contains(&"hostodo-via-firstbyte")
-            && auto_members.contains(&"hostodo-via-timeweb")
-        {
-            let fb = auto_members
-                .iter()
-                .position(|m| *m == "hostodo-via-firstbyte")
-                .unwrap();
-            let tw = auto_members
-                .iter()
-                .position(|m| *m == "hostodo-via-timeweb")
-                .unwrap();
-            assert!(fb < tw, "FirstByte before Timeweb in Auto: {:?}", auto_members);
-        }
-
         for tag in ["proxy-tg", "proxy-yt"] {
             let g = by_tag(tag);
             assert_eq!(g.get("type").and_then(|t| t.as_str()), Some("urltest"));
@@ -2150,7 +2201,7 @@ mod tests {
     #[test]
     fn proteus_config_urls_include_backend_fallback() {
         let urls = proteus_config_urls("test-sub-key");
-        assert_eq!(urls.len(), 3);
+        assert_eq!(urls.len(), 2);
         assert_eq!(
             urls[0],
             "https://config.getlumen.download/proteus-sub?sub=test-sub-key&format=json-text"
@@ -2158,10 +2209,6 @@ mod tests {
         assert_eq!(
             urls[1],
             "https://primary-production-1d1cf.up.railway.app/webhook/proteus-sub?sub=test-sub-key&format=json-text"
-        );
-        assert_eq!(
-            urls[2],
-            "https://sub.hwai-ops.xyz/proteus-sub?sub=test-sub-key&format=json-text"
         );
     }
 
@@ -2183,9 +2230,6 @@ mod tests {
     fn config_dns_pins_cover_cf_control_plane_hosts() {
         assert!(config_url_supports_dns_pins(
             "https://config.getlumen.download/proteus-sub?sub=x"
-        ));
-        assert!(config_url_supports_dns_pins(
-            "https://sub.hwai-ops.xyz/proteus-sub?sub=x"
         ));
         assert!(!config_url_supports_dns_pins(
             "https://primary-production-1d1cf.up.railway.app/webhook/proteus-sub?sub=x"

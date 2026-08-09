@@ -3,6 +3,24 @@ use std::process::Command;
 // ── macOS ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
+fn run_networksetup(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("networksetup").args(args).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(format!(
+        "networksetup {} failed: {}{}",
+        args.join(" "),
+        stderr.trim(),
+        stdout.trim()
+    )
+    .into())
+}
+
+#[cfg(target_os = "macos")]
 fn active_network_service() -> Result<String, Box<dyn std::error::Error>> {
     let candidates = ["Wi-Fi", "Ethernet", "USB 10/100/1000 LAN"];
 
@@ -46,24 +64,12 @@ pub fn enable_system_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> 
         port
     );
 
-    Command::new("networksetup")
-        .args(["-setwebproxy", &service, "127.0.0.1", &port_str])
-        .output()?;
-    Command::new("networksetup")
-        .args(["-setwebproxystate", &service, "on"])
-        .output()?;
-    Command::new("networksetup")
-        .args(["-setsecurewebproxy", &service, "127.0.0.1", &port_str])
-        .output()?;
-    Command::new("networksetup")
-        .args(["-setsecurewebproxystate", &service, "on"])
-        .output()?;
-    Command::new("networksetup")
-        .args(["-setsocksfirewallproxy", &service, "127.0.0.1", &port_str])
-        .output()?;
-    Command::new("networksetup")
-        .args(["-setsocksfirewallproxystate", &service, "on"])
-        .output()?;
+    run_networksetup(&["-setwebproxy", &service, "127.0.0.1", &port_str])?;
+    run_networksetup(&["-setwebproxystate", &service, "on"])?;
+    run_networksetup(&["-setsecurewebproxy", &service, "127.0.0.1", &port_str])?;
+    run_networksetup(&["-setsecurewebproxystate", &service, "on"])?;
+    run_networksetup(&["-setsocksfirewallproxy", &service, "127.0.0.1", &port_str])?;
+    run_networksetup(&["-setsocksfirewallproxystate", &service, "on"])?;
 
     log::info!("System proxy enabled: {}:{}", service, port);
     Ok(())
@@ -75,15 +81,9 @@ pub fn disable_system_proxy() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Disabling system proxy on '{}'", service);
 
-    Command::new("networksetup")
-        .args(["-setwebproxystate", &service, "off"])
-        .output()?;
-    Command::new("networksetup")
-        .args(["-setsecurewebproxystate", &service, "off"])
-        .output()?;
-    Command::new("networksetup")
-        .args(["-setsocksfirewallproxystate", &service, "off"])
-        .output()?;
+    run_networksetup(&["-setwebproxystate", &service, "off"])?;
+    run_networksetup(&["-setsecurewebproxystate", &service, "off"])?;
+    run_networksetup(&["-setsocksfirewallproxystate", &service, "off"])?;
 
     log::info!("System proxy disabled on '{}'", service);
     Ok(())

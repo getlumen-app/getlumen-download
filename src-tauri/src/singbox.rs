@@ -1,6 +1,9 @@
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+pub const LOCAL_PROXY_PORT: u16 = 10808;
 
 /// Build a `Command` that never flashes a console window on Windows.
 /// A child process spawned without `CREATE_NO_WINDOW` briefly pops a console
@@ -244,6 +247,16 @@ impl SingboxManager {
     pub fn is_running(&mut self) -> bool {
         self.running = Self::check_running_static();
         self.running
+    }
+
+    pub fn is_ready(&mut self) -> bool {
+        self.running = Self::check_running_static();
+        self.running && Self::local_proxy_listener_ready()
+    }
+
+    pub fn local_proxy_listener_ready() -> bool {
+        let addr = SocketAddr::from(([127, 0, 0, 1], LOCAL_PROXY_PORT));
+        TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
     }
 
     fn check_running_static() -> bool {

@@ -78,7 +78,8 @@ pub fn parse_bootstrap_payload(raw: &str) -> Result<BootstrapImportResult, Boots
 
 pub async fn import_bootstrap_payload(raw: &str) -> Result<BootstrapImportResult, BootstrapError> {
     let result = parse_bootstrap_payload(raw)?;
-    let parsed = vless::parse_vless(&result.value).map_err(|e| format!("VLESS parse failed: {}", e))?;
+    let parsed =
+        vless::parse_vless(&result.value).map_err(|e| format!("VLESS parse failed: {}", e))?;
 
     // Prebuild both configs so a clean install can connect without reaching the
     // control-plane endpoints. The payload is still per-user and revocable.
