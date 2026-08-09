@@ -103,6 +103,18 @@
   word-break: break-word;
 }
 
+.home__restart-hint {
+  max-width: 300px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  text-align: center;
+}
+
 /* ── Connection time ── */
 .home__time {
   font-family: var(--font-mono);

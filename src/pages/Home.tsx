@@ -31,6 +31,7 @@ interface Props {
   locationNodes?: ProxyNode[];
   onSelectLocation?: (tag: string) => void;
   errorMsg?: string;
+  restartHint?: boolean;
 }
 
 function formatTime(seconds: number): string {
@@ -67,6 +68,7 @@ export default function Home({
   locationNodes,
   onSelectLocation,
   errorMsg,
+  restartHint,
 }: Props) {
   const [sheetOpen, setSheetOpen] = useState(false);
   const locations: LocationOption[] = availableLocations(locationNodes);
@@ -124,6 +126,12 @@ export default function Home({
       )}
 
       {errorMsg && <div className="home__error">{errorMsg}</div>}
+
+      {restartHint && connectionState === "disconnected" && (
+        <div className="home__restart-hint">
+          Restart apps opened while Lumen was connected.
+        </div>
+      )}
 
       <div
         className={`home__speed ${connectionState === "connected" ? "visible" : ""}`}
