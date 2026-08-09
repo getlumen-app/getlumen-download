@@ -4,6 +4,7 @@ import { transformSync } from "esbuild";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("../src/lib/connectionState.ts", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 const { code } = transformSync(source, {
   format: "cjs",
   loader: "ts",
@@ -15,6 +16,30 @@ const context = {
 };
 vm.runInNewContext(code, context);
 const lib = context.module.exports;
+
+{
+  const start = appSource.indexOf("async function connectWithPreferredMode");
+  const end = appSource.indexOf("async function switchToPreferredMode", start);
+  assert.notEqual(start, -1, "App must define connectWithPreferredMode");
+  assert.notEqual(end, -1, "App must keep connectWithPreferredMode before switchToPreferredMode");
+  const connectBody = appSource.slice(start, end);
+  const intentWrite = connectBody.indexOf(
+    'localStorage.setItem(CONNECTION_INTENT_KEY, "connected");'
+  );
+  const proxyConnect = connectBody.indexOf("await tauri.connect(accessKey);");
+  const tunConnect = connectBody.indexOf("await tauri.tunConnect(accessKey);");
+  const disconnectIntent = connectBody.indexOf(
+    'localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");'
+  );
+  assert(
+    intentWrite !== -1 && intentWrite < proxyConnect && intentWrite < tunConnect,
+    "connect intent must be written before native connect starts the transport"
+  );
+  assert(
+    disconnectIntent !== -1 && disconnectIntent > intentWrite,
+    "failed connect must restore disconnected intent"
+  );
+}
 
 assert.equal(lib.transportFromEffectiveStatus("connected-tun"), "tun");
 assert.equal(lib.transportFromEffectiveStatus("connected-proxy"), "proxy");
