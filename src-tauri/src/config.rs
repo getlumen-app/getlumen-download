@@ -938,9 +938,10 @@ const GEO_SELECTOR_TAGS: &[&str] = &[
 ];
 
 /// Leaves that may appear in the selector for explicit pin, but must never
-/// join Auto urltest (true RF exits / residentials). USA/Germany pins that
-/// are also RF-relay entrypoints stay eligible for Auto.
+/// join Auto urltest (true RF exits / residentials, or field-broken relays).
+/// They remain available for manual diagnostics/pins without poisoning Auto.
 const AUTO_EXCLUDED_GEO_TAGS: &[&str] = &[
+    "relay-eu-443",
     "dubai-residential",
     "izhevsk-via-firstbyte",
     "izhevsk-via-netcup",
@@ -1956,6 +1957,11 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
+        assert!(
+            !auto_members.contains(&"relay-eu-443"),
+            "Auto must not include relay-eu-443; field probes showed it can \
+             pass selection but timeout general web/OpenAI traffic"
+        );
         assert!(
             !auto_members.contains(&"dubai-residential"),
             "Auto must not include Vision residential dubai"
