@@ -59,6 +59,7 @@ export default function App() {
   const [connectionTime, setConnectionTime] = useState(0);
   const [showLogs, setShowLogs] = useState(false);
   const [activeTransport, setActiveTransport] = useState<ActiveTransport>(null);
+  const [restartHint, setRestartHint] = useState(false);
   const trafficInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const healthFailures = useRef(0);
   const fallbackSwitching = useRef(false);
@@ -361,7 +362,8 @@ export default function App() {
     // Stop proxy first, then TUN. Effective status prefers TUN when helper is up.
     if (plan.stopProxy) {
       try {
-        await tauri.disconnect();
+        const outcome = await tauri.disconnect();
+        if (outcome.proxy_env_cleared) setRestartHint(true);
       } catch (e) {
         console.error("Proxy disconnect error:", e);
       }
@@ -386,6 +388,7 @@ export default function App() {
     if (!accessKey) return;
     setConnectionState("connecting");
     setErrorMsg("");
+    setRestartHint(false);
     locationAppliedRef.current = false;
     // Native connect starts the transport before the command resolves; mark
     // intent first so status sync never tears down that in-flight session.
@@ -602,6 +605,7 @@ export default function App() {
             locationNodes={locationNodes}
             onSelectLocation={handleSelectLocation}
             errorMsg={errorMsg}
+            restartHint={restartHint}
           />
         )}
         {tab === "proxies" && (

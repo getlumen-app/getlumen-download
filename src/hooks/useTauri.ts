@@ -15,9 +15,13 @@ export async function connect(key: string): Promise<void> {
   return invoke("connect", { key });
 }
 
-export async function disconnect(): Promise<void> {
-  if (!IS_TAURI) return;
-  return invoke("disconnect");
+export interface DisconnectOutcome {
+  proxy_env_cleared: boolean;
+}
+
+export async function disconnect(): Promise<DisconnectOutcome> {
+  if (!IS_TAURI) return { proxy_env_cleared: false };
+  return invoke<DisconnectOutcome>("disconnect");
 }
 
 export async function getStatus(): Promise<string> {

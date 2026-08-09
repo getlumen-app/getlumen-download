@@ -29,6 +29,11 @@ pub struct AppState {
 }
 
 #[derive(serde::Serialize)]
+struct DisconnectOutcome {
+    proxy_env_cleared: bool,
+}
+
+#[derive(serde::Serialize)]
 struct RepairNetworkResult {
     proxy_was_running: bool,
     tun_was_running: bool,
@@ -251,32 +256,139 @@ async fn wait_for_local_proxy_route_health() -> Result<(), String> {
     ))
 }
 
+pub fn lumen_proxy_env_pairs() -> [(&'static str, String); 3] {
+    [
+        (
+            "https_proxy",
+            format!("http://127.0.0.1:{}", singbox::LOCAL_PROXY_PORT),
+        ),
+        (
+            "http_proxy",
+            format!("http://127.0.0.1:{}", singbox::LOCAL_PROXY_PORT),
+        ),
+        (
+            "all_proxy",
+            format!("socks5://127.0.0.1:{}", singbox::LOCAL_PROXY_PORT),
+        ),
+    ]
+}
+
+pub fn stale_lumen_proxy_env_keys<'a>(
+    observed: &[(&'a str, Option<&str>)],
+    listener_alive: bool,
+) -> Vec<&'a str> {
+    if listener_alive {
+        return Vec::new();
+    }
+
+    let ours = lumen_proxy_env_pairs();
+    observed
+        .iter()
+        .filter_map(|(key, value)| {
+            let expected = ours
+                .iter()
+                .find(|(candidate, _)| candidate == key)
+                .map(|(_, expected)| expected.as_str())?;
+            match value {
+                Some(actual) if *actual == expected => Some(*key),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 fn set_lumen_proxy_env() {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("launchctl")
-            .args(["setenv", "https_proxy", "http://127.0.0.1:10808"])
-            .output()
-            .ok();
-        std::process::Command::new("launchctl")
-            .args(["setenv", "http_proxy", "http://127.0.0.1:10808"])
-            .output()
-            .ok();
-        std::process::Command::new("launchctl")
-            .args(["setenv", "all_proxy", "socks5://127.0.0.1:10808"])
-            .output()
-            .ok();
+        for (key, value) in lumen_proxy_env_pairs() {
+            std::process::Command::new("launchctl")
+                .args(["setenv", key, value.as_str()])
+                .output()
+                .ok();
+        }
     }
 }
 
-fn clear_lumen_proxy_env() {
+fn clear_lumen_proxy_env() -> Vec<&'static str> {
+    let mut survivors = Vec::new();
     #[cfg(target_os = "macos")]
     {
-        for key in ["https_proxy", "http_proxy", "all_proxy"] {
+        for (key, _) in lumen_proxy_env_pairs() {
             std::process::Command::new("launchctl")
                 .args(["unsetenv", key])
                 .output()
                 .ok();
+            if read_launchd_env(key).is_some() {
+                log::warn!("launchd proxy variable {} survived unsetenv", key);
+                survivors.push(key);
+            }
+        }
+    }
+    survivors
+}
+
+#[cfg(target_os = "macos")]
+fn read_launchd_env(key: &str) -> Option<String> {
+    let output = std::process::Command::new("launchctl")
+        .args(["getenv", key])
+        .output()
+        .ok()?;
+    let value = String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn has_lumen_proxy_env() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        lumen_proxy_env_pairs()
+            .into_iter()
+            .any(|(key, expected)| read_launchd_env(key).as_deref() == Some(expected.as_str()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+fn heal_stale_lumen_proxy_env() {
+    #[cfg(target_os = "macos")]
+    {
+        let listener_alive = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], singbox::LOCAL_PROXY_PORT)),
+            std::time::Duration::from_millis(200),
+        )
+        .is_ok();
+        let observed: Vec<_> = lumen_proxy_env_pairs()
+            .into_iter()
+            .map(|(key, _)| (key, read_launchd_env(key)))
+            .collect();
+        let borrowed: Vec<_> = observed
+            .iter()
+            .map(|(key, value)| (*key, value.as_deref()))
+            .collect();
+
+        for key in stale_lumen_proxy_env_keys(&borrowed, listener_alive) {
+            std::process::Command::new("launchctl")
+                .args(["unsetenv", key])
+                .output()
+                .ok();
+            if read_launchd_env(key).is_some() {
+                log::error!(
+                    "stale launchd variable {} survived unsetenv at startup",
+                    key
+                );
+            } else {
+                log::info!(
+                    "cleared stale launchd variable {} left by a previous run",
+                    key
+                );
+            }
         }
     }
 }
@@ -428,22 +540,25 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command]
-async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    // 1. Disable system proxy
-    proxy::disable_system_proxy().map_err(|e| e.to_string())?;
+async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectOutcome, String> {
+    // Nothing may early-return before the env cleanup. The launchd variables
+    // outlive this process and get inherited by every app started next.
+    let system_proxy = proxy::disable_system_proxy().map_err(|e| e.to_string());
+    let proxy_env_cleared = has_lumen_proxy_env();
 
-    // 2. Clear env vars (macOS only)
     clear_lumen_proxy_env();
 
-    // 3. Stop sing-box
-    state
+    let singbox = state
         .singbox
         .lock()
         .unwrap()
         .stop()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
 
-    Ok(())
+    system_proxy?;
+    singbox?;
+
+    Ok(DisconnectOutcome { proxy_env_cleared })
 }
 
 #[tauri::command]
@@ -692,6 +807,7 @@ pub fn run() {
             config_path: Mutex::new(None),
         })
         .setup(|app| {
+            heal_stale_lumen_proxy_env();
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
