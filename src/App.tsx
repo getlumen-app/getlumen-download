@@ -387,6 +387,9 @@ export default function App() {
     setConnectionState("connecting");
     setErrorMsg("");
     locationAppliedRef.current = false;
+    // Native connect starts the transport before the command resolves; mark
+    // intent first so status sync never tears down that in-flight session.
+    localStorage.setItem(CONNECTION_INTENT_KEY, "connected");
 
     try {
       if (useTun) {
@@ -397,7 +400,6 @@ export default function App() {
         await tauri.connect(accessKey);
         setActiveTransport("proxy");
       }
-      localStorage.setItem(CONNECTION_INTENT_KEY, "connected");
       setConnectionState("connected");
       setCurrentServer(readStoredLocation());
     } catch (e) {
@@ -416,12 +418,14 @@ export default function App() {
         } catch (fallbackError) {
           console.error("WB Stream fallback error:", fallbackError);
           setErrorMsg(`${msg}; WB Stream fallback failed: ${fallbackError}`);
+          localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
           setConnectionState("error");
           return;
         }
       } else {
         setErrorMsg(msg);
       }
+      localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
       setConnectionState("error");
       setActiveTransport(null);
       // Reset to disconnected after showing error
