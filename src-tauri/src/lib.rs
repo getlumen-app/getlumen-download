@@ -193,17 +193,17 @@ async fn prepare_proxy_config(key: &str) -> Result<Vec<String>, String> {
 async fn wait_for_clash_api() -> bool {
     let probe = reqwest::Client::builder()
         .no_proxy()
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_millis(500))
         .build()
         .unwrap();
 
-    for _ in 0..3 {
+    for _ in 0..30 {
         if let Ok(resp) = probe.get("http://127.0.0.1:9090/version").send().await {
             if resp.status().is_success() {
                 return true;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     false
 }

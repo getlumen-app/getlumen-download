@@ -59,3 +59,20 @@ fn source_must_not_use_bare_sing_box_run_pgrep() {
         "killall sing-box is forbidden; it stops helper TUN too"
     );
 }
+
+#[test]
+fn startup_readiness_must_not_use_fixed_second_scale_sleeps() {
+    let src = include_str!("../src/singbox.rs");
+    assert!(
+        src.contains("fn wait_until_stopped"),
+        "old-process shutdown should poll until stopped instead of sleeping blindly"
+    );
+    assert!(
+        !src.contains("Duration::from_secs(3)"),
+        "startup must not always spend 3s before checking whether sing-box is ready"
+    );
+    assert!(
+        !src.contains("sleep(std::time::Duration::from_secs(1))"),
+        "old-process cleanup must not always spend 1s when no old process is alive"
+    );
+}
