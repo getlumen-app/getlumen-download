@@ -202,11 +202,10 @@ fn build_client(route: DiagnosticsRoute) -> Result<reqwest::Client, String> {
         .local_address(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
     builder = match route {
-        DiagnosticsRoute::ThroughLocalProxy => builder
-            .proxy(
-                reqwest::Proxy::all(LOCAL_MIXED_PROXY)
-                    .map_err(|e| format!("diagnostics proxy: {e}"))?,
-            ),
+        DiagnosticsRoute::ThroughLocalProxy => builder.proxy(
+            reqwest::Proxy::all(LOCAL_MIXED_PROXY)
+                .map_err(|e| format!("diagnostics proxy: {e}"))?,
+        ),
         DiagnosticsRoute::DirectSocket => builder.no_proxy(),
     };
 
@@ -421,8 +420,8 @@ mod tests {
             parse_ipify_json(&json!({"ip": "1.2.3.4"})).as_deref(),
             Some("1.2.3.4")
         );
-        let snap = parse_myip_json(&json!({"ip":"1.2.3.4","country":"Germany","cc":"DE"}))
-            .expect("myip");
+        let snap =
+            parse_myip_json(&json!({"ip":"1.2.3.4","country":"Germany","cc":"DE"})).expect("myip");
         assert_eq!(snap.country.as_deref(), Some("Germany"));
     }
 }

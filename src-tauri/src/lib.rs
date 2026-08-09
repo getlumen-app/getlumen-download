@@ -1,5 +1,5 @@
-mod clash_api;
 mod bootstrap;
+mod clash_api;
 mod config;
 mod health_monitor;
 mod ip_diagnostics;
@@ -208,6 +208,49 @@ async fn wait_for_clash_api() -> bool {
     false
 }
 
+async fn wait_for_local_proxy_listener(state: &State<'_, AppState>) -> bool {
+    for _ in 0..30 {
+        if state.singbox.lock().unwrap().is_ready() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+async fn wait_for_local_proxy_route_health() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .proxy(
+            reqwest::Proxy::all(format!("http://127.0.0.1:{}", singbox::LOCAL_PROXY_PORT))
+                .map_err(|e| format!("local proxy health probe setup: {}", e))?,
+        )
+        .user_agent(concat!(
+            "Lumen/",
+            env!("CARGO_PKG_VERSION"),
+            " proxy-health"
+        ))
+        .build()
+        .map_err(|e| format!("local proxy health client: {}", e))?;
+
+    let mut last_error = "no probe attempted".to_string();
+    for url in [
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "https://config.getlumen.download/health",
+    ] {
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(resp) => last_error = format!("{} returned {}", url, resp.status()),
+            Err(e) => last_error = format!("{} failed: {}", url, e),
+        }
+    }
+
+    Err(format!(
+        "local System Proxy listener is up, but outbound proxy route is unhealthy: {}",
+        last_error
+    ))
+}
+
 fn set_lumen_proxy_env() {
     #[cfg(target_os = "macos")]
     {
@@ -223,6 +266,18 @@ fn set_lumen_proxy_env() {
             .args(["setenv", "all_proxy", "socks5://127.0.0.1:10808"])
             .output()
             .ok();
+    }
+}
+
+fn clear_lumen_proxy_env() {
+    #[cfg(target_os = "macos")]
+    {
+        for key in ["https_proxy", "http_proxy", "all_proxy"] {
+            std::process::Command::new("launchctl")
+                .args(["unsetenv", key])
+                .output()
+                .ok();
+        }
     }
 }
 
@@ -294,9 +349,22 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
         state.singbox.lock().unwrap().stop().ok();
         return Err("sing-box started but Clash API not responding".to_string());
     }
+    if !wait_for_local_proxy_listener(&state).await {
+        state.singbox.lock().unwrap().stop().ok();
+        return Err("sing-box started but local System Proxy listener 127.0.0.1:10808 is not accepting connections".to_string());
+    }
+    if let Err(e) = wait_for_local_proxy_route_health().await {
+        state.singbox.lock().unwrap().stop().ok();
+        clear_lumen_proxy_env();
+        return Err(e);
+    }
 
     // 4. Enable system proxy (covers browser + native apps)
-    proxy::enable_system_proxy(10808).map_err(|e| format!("Proxy setup failed: {}", e))?;
+    if let Err(e) = proxy::enable_system_proxy(singbox::LOCAL_PROXY_PORT) {
+        state.singbox.lock().unwrap().stop().ok();
+        clear_lumen_proxy_env();
+        return Err(format!("Proxy setup failed: {}", e));
+    }
 
     // 5. Set env vars for Electron apps (macOS only)
     set_lumen_proxy_env();
@@ -320,7 +388,9 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
                     .lock()
                     .unwrap()
                     .start(&path_str)
-                    .map_err(|e| format!("sing-box restart failed after full config fetch: {}", e))?;
+                    .map_err(|e| {
+                        format!("sing-box restart failed after full config fetch: {}", e)
+                    })?;
                 if !wait_for_clash_api().await {
                     state.singbox.lock().unwrap().stop().ok();
                     return Err(
@@ -328,8 +398,21 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
                             .to_string(),
                     );
                 }
-                proxy::enable_system_proxy(10808)
-                    .map_err(|e| format!("Proxy setup failed after full config fetch: {}", e))?;
+                if !wait_for_local_proxy_listener(&state).await {
+                    state.singbox.lock().unwrap().stop().ok();
+                    clear_lumen_proxy_env();
+                    return Err("Full config fetched but local System Proxy listener 127.0.0.1:10808 is not accepting connections".to_string());
+                }
+                if let Err(e) = wait_for_local_proxy_route_health().await {
+                    state.singbox.lock().unwrap().stop().ok();
+                    clear_lumen_proxy_env();
+                    return Err(format!("Full config fetched but {}", e));
+                }
+                if let Err(e) = proxy::enable_system_proxy(singbox::LOCAL_PROXY_PORT) {
+                    state.singbox.lock().unwrap().stop().ok();
+                    clear_lumen_proxy_env();
+                    return Err(format!("Proxy setup failed after full config fetch: {}", e));
+                }
                 set_lumen_proxy_env();
             }
             Err(e) => {
@@ -350,21 +433,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     proxy::disable_system_proxy().map_err(|e| e.to_string())?;
 
     // 2. Clear env vars (macOS only)
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("launchctl")
-            .args(["setenv", "https_proxy", ""])
-            .output()
-            .ok();
-        std::process::Command::new("launchctl")
-            .args(["setenv", "http_proxy", ""])
-            .output()
-            .ok();
-        std::process::Command::new("launchctl")
-            .args(["setenv", "all_proxy", ""])
-            .output()
-            .ok();
-    }
+    clear_lumen_proxy_env();
 
     // 3. Stop sing-box
     state
@@ -430,8 +499,8 @@ fn health_monitor_decision(
 
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<String, String> {
-    let running = state.singbox.lock().unwrap().is_running();
-    Ok(if running { "connected" } else { "disconnected" }.to_string())
+    let ready = state.singbox.lock().unwrap().is_ready();
+    Ok(if ready { "connected" } else { "disconnected" }.to_string())
 }
 
 #[tauri::command]
@@ -448,7 +517,7 @@ async fn get_effective_status(state: State<'_, AppState>) -> Result<String, Stri
         }
     }
 
-    if state.singbox.lock().unwrap().is_running() {
+    if state.singbox.lock().unwrap().is_ready() {
         return Ok("connected-proxy".to_string());
     }
 
@@ -511,15 +580,7 @@ async fn repair_network(state: State<'_, AppState>) -> Result<RepairNetworkResul
         result.errors.push(format!("system proxy: {}", e));
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        for key in ["https_proxy", "http_proxy", "all_proxy"] {
-            std::process::Command::new("launchctl")
-                .args(["setenv", key, ""])
-                .output()
-                .ok();
-        }
-    }
+    clear_lumen_proxy_env();
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {

@@ -405,6 +405,26 @@ export default function App() {
     } catch (e) {
       const msg = String(e);
       console.error("Connect error:", msg);
+      if (!useTun && msg.includes("outbound proxy route is unhealthy")) {
+        try {
+          const tunReady = await tauri.isTunAvailable();
+          if (tunReady) {
+            console.warn("System Proxy route unhealthy; falling back to TUN");
+            await tauri.tunConnect(accessKey);
+            setActiveTransport("tun");
+            healthFailures.current = 0;
+            setConnectionState("connected");
+            setCurrentServer(readStoredLocation());
+            return;
+          }
+        } catch (tunFallbackError) {
+          console.error("TUN fallback after proxy health failure failed:", tunFallbackError);
+          setErrorMsg(`${msg}; TUN fallback failed: ${tunFallbackError}`);
+          localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
+          setConnectionState("error");
+          return;
+        }
+      }
       // Control-plane / local failures must not jump to WB Stream (Doha class).
       // Hard-whitelist carrier is owned by the post-connect health monitor.
       if (useTun && shouldAttemptWbstreamOnConnectError(msg)) {
