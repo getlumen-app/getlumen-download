@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// Build a `Command` that never flashes a console window on Windows.
 /// A child process spawned without `CREATE_NO_WINDOW` briefly pops a console
@@ -8,13 +9,16 @@ use std::process::Command;
 /// blink every 5 seconds (Polina, Windows, 2026-06-10). Every process spawn in
 /// this module goes through this one builder so the flag can never be missed.
 fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
-    let mut cmd = Command::new(program);
+    let cmd = Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        let mut cmd = cmd;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
+        return cmd;
     }
+    #[cfg(not(windows))]
     cmd
 }
 
@@ -177,7 +181,12 @@ impl SingboxManager {
 
         // Kill any old System Proxy sing-box (never helper TUN).
         Self::kill_all();
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        if !Self::wait_until_stopped(Duration::from_secs(2), Duration::from_millis(50)) {
+            Self::force_kill();
+            if !Self::wait_until_stopped(Duration::from_millis(500), Duration::from_millis(50)) {
+                return Err("old System Proxy sing-box did not stop".into());
+            }
+        }
 
         // Start sing-box with log output to file
         let log_path = super::config::data_dir().join("singbox.log");
@@ -195,7 +204,7 @@ impl SingboxManager {
 
         // One spawn for both platforms; silent_command() adds CREATE_NO_WINDOW
         // on Windows so sing-box never flashes a console window.
-        silent_command(&singbox_bin)
+        let mut child = silent_command(&singbox_bin)
             .args(["run", "-c", config_path])
             .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
             .stdout(std::process::Stdio::from(log_file))
@@ -203,25 +212,30 @@ impl SingboxManager {
             .spawn()
             .map_err(|e| format!("Failed to start sing-box: {}", e))?;
 
-        // Wait for startup
-        std::thread::sleep(std::time::Duration::from_secs(3));
-
-        if !Self::check_running_static() {
-            return Err("sing-box exited immediately. Check config.".into());
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if let Some(status) = child.try_wait()? {
+                return Err(
+                    format!("sing-box exited immediately ({status}). Check config.").into(),
+                );
+            }
+            if Self::check_running_static() {
+                self.running = true;
+                log::info!("sing-box started in proxy mode");
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
 
-        self.running = true;
-        log::info!("sing-box started in proxy mode");
-        Ok(())
+        Err("sing-box did not appear in process table after startup".into())
     }
 
     pub fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         log::info!("Stopping System Proxy sing-box");
         Self::kill_all();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // Force kill if still alive
-        if Self::check_running_static() {
+        if !Self::wait_until_stopped(Duration::from_millis(500), Duration::from_millis(50)) {
             Self::force_kill();
+            Self::wait_until_stopped(Duration::from_millis(500), Duration::from_millis(50));
         }
         self.running = false;
         Ok(())
@@ -242,6 +256,19 @@ impl SingboxManager {
 
     fn force_kill() {
         kill_proxy_singbox_processes(true);
+    }
+
+    fn wait_until_stopped(timeout: Duration, poll_interval: Duration) -> bool {
+        let started = Instant::now();
+        loop {
+            if !Self::check_running_static() {
+                return true;
+            }
+            if started.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(poll_interval);
+        }
     }
 
     fn find_binary() -> Result<String, Box<dyn std::error::Error>> {
