@@ -54,8 +54,8 @@ const home = read("src/pages/Home.tsx");
   );
   assert.match(
     home,
-    /restart/i,
-    "the hint text must tell the user to restart the affected apps"
+    /приложения, запущенные при включённом VPN, могут требовать перезапуска/,
+    "the hint text must use the approved soft restart warning"
   );
   assert.doesNotMatch(
     home,

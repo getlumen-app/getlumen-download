@@ -333,14 +333,13 @@ fn read_launchd_env(key: &str) -> Option<String> {
         .args(["getenv", key])
         .output()
         .ok()?;
+    if output.stdout.is_empty() {
+        return None;
+    }
     let value = String::from_utf8_lossy(&output.stdout)
         .trim_end_matches('\n')
         .to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    Some(value)
 }
 
 fn has_lumen_proxy_env() -> bool {
@@ -359,11 +358,7 @@ fn has_lumen_proxy_env() -> bool {
 fn heal_stale_lumen_proxy_env() {
     #[cfg(target_os = "macos")]
     {
-        let listener_alive = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], singbox::LOCAL_PROXY_PORT)),
-            std::time::Duration::from_millis(200),
-        )
-        .is_ok();
+        let listener_alive = singbox::SingboxManager::local_proxy_listener_ready();
         let observed: Vec<_> = lumen_proxy_env_pairs()
             .into_iter()
             .map(|(key, _)| (key, read_launchd_env(key)))
@@ -695,7 +690,11 @@ async fn repair_network(state: State<'_, AppState>) -> Result<RepairNetworkResul
         result.errors.push(format!("system proxy: {}", e));
     }
 
-    clear_lumen_proxy_env();
+    for key in clear_lumen_proxy_env() {
+        result
+            .errors
+            .push(format!("proxy env {} still set in the launchd domain", key));
+    }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
