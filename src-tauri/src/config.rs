@@ -103,6 +103,10 @@ struct TunPolicy {
     interface_name: &'static str,
     mtu: u16,
     strict_route: bool,
+    /// sing-box netstack. Windows clients that work in the field (v2rayN,
+    /// Clash Verge, NekoRay) ship `gvisor` as the default there: the system
+    /// TCP stack behind `mixed` is the fragile one on Wintun adapters.
+    stack: &'static str,
 }
 
 fn tun_policy_for_target(target_os: &str) -> TunPolicy {
@@ -111,11 +115,13 @@ fn tun_policy_for_target(target_os: &str) -> TunPolicy {
             interface_name: "Lumen",
             mtu: 1500,
             strict_route: true,
+            stack: "gvisor",
         },
         _ => TunPolicy {
             interface_name: "utun777",
             mtu: 9000,
             strict_route: false,
+            stack: "mixed",
         },
     }
 }
@@ -131,7 +137,7 @@ fn tun_inbounds_for_target(target_os: &str) -> serde_json::Value {
             "mtu": policy.mtu,
             "auto_route": true,
             "strict_route": policy.strict_route,
-            "stack": "mixed",
+            "stack": policy.stack,
             "endpoint_independent_nat": true,
             "sniff": true,
             "sniff_override_destination": false
@@ -1323,6 +1329,10 @@ mod tests {
         assert_eq!(policy.interface_name, "Lumen");
         assert_eq!(policy.mtu, 1500);
         assert!(policy.strict_route, "Windows TUN must prevent DNS leaks");
+        assert_eq!(
+            policy.stack, "gvisor",
+            "Windows must use the netstack the working Windows clients ship"
+        );
     }
 
     #[test]
@@ -1331,6 +1341,7 @@ mod tests {
         assert_eq!(policy.interface_name, "utun777");
         assert_eq!(policy.mtu, 9000);
         assert!(!policy.strict_route);
+        assert_eq!(policy.stack, "mixed");
     }
 
     #[test]

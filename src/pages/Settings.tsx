@@ -18,6 +18,9 @@ interface TunStatus {
   singbox_running: boolean;
   singbox_pid: number | null;
   uptime_secs: number | null;
+  platform?: "macos" | "windows";
+  /** Windows: the runtime is present but Lumen is not running as administrator. */
+  needs_elevation?: boolean;
 }
 
 interface Props {
@@ -49,6 +52,7 @@ export default function Settings({
   // VPN mode state — System Proxy is the fail-closed default.
   const [tunStatus, setTunStatus] = useState<TunStatus | null>(null);
   const [tunBusy, setTunBusy] = useState(false);
+  const [tunError, setTunError] = useState<string | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
   const [repairStatus, setRepairStatus] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<tauri.NetworkDiagnostics | null>(null);
@@ -88,11 +92,15 @@ export default function Settings({
 
   async function handleInstallHelper() {
     setTunBusy(true);
+    setTunError(null);
     try {
+      // Windows answers this by restarting Lumen with administrator rights, so
+      // the promise only resolves when TUN was already unlocked or the UAC
+      // prompt was declined.
       await invoke("tun_install_helper");
       await refreshTunStatus();
     } catch (e) {
-      alert("Helper install failed: " + e);
+      setTunError(String(e));
     } finally {
       setTunBusy(false);
     }
@@ -101,11 +109,12 @@ export default function Settings({
   async function handleUninstallHelper() {
     if (!confirm("Uninstall the privileged VPN helper? Lumen will fall back to slower system proxy mode.")) return;
     setTunBusy(true);
+    setTunError(null);
     try {
       await invoke("tun_uninstall_helper");
       await refreshTunStatus();
     } catch (e) {
-      alert("Helper uninstall failed: " + e);
+      setTunError(String(e));
     } finally {
       setTunBusy(false);
     }
@@ -212,6 +221,9 @@ export default function Settings({
 
   void accessKey; void copied; void setCopied;
 
+  const isWindowsTun = tunStatus?.platform === "windows";
+  const tunNeedsElevation = Boolean(tunStatus?.needs_elevation);
+
   return (
     <div className="settings">
       <div className="settings__header">
@@ -296,11 +308,17 @@ export default function Settings({
                   </span>
                   <strong>TUN mode</strong> — kernel routing, low latency, all apps & UDP covered.
                 </p>
-                <div className="settings__actions">
-                  <button className="settings__action-btn" onClick={handleUninstallHelper} disabled={tunBusy}>
-                    {tunBusy ? "Working..." : "Uninstall Helper"}
-                  </button>
-                </div>
+                {isWindowsTun ? (
+                  <p className="settings__info">
+                    Lumen is running as administrator, so the TUN adapter can be created. Restart Lumen normally to go back to System Proxy only.
+                  </p>
+                ) : (
+                  <div className="settings__actions">
+                    <button className="settings__action-btn" onClick={handleUninstallHelper} disabled={tunBusy}>
+                      {tunBusy ? "Working..." : "Uninstall Helper"}
+                    </button>
+                  </div>
+                )}
               </>
             ) : (
               <>
@@ -310,13 +328,32 @@ export default function Settings({
                   </span>
                   <strong>System Proxy mode</strong> — works without root; apps that ignore the OS proxy (Telegram Desktop) need SOCKS5 <code>127.0.0.1:10808</code>.
                 </p>
-                <div className="settings__actions">
-                  <button className="settings__action-btn" onClick={handleUninstallHelper} disabled={tunBusy}>
-                    {tunBusy ? "Working..." : "Uninstall Helper"}
-                  </button>
-                </div>
+                {!isWindowsTun && (
+                  <div className="settings__actions">
+                    <button className="settings__action-btn" onClick={handleUninstallHelper} disabled={tunBusy}>
+                      {tunBusy ? "Working..." : "Uninstall Helper"}
+                    </button>
+                  </div>
+                )}
               </>
             )
+          ) : tunNeedsElevation ? (
+            <>
+              <p className="settings__info">
+                <span className="settings__mode-icon" aria-hidden="true">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </span>
+                <strong>System Proxy mode</strong>. TUN gives lower latency and covers every app (Telegram without a separate SOCKS).
+              </p>
+              <p className="settings__info">
+                Windows only lets an administrator create a VPN adapter, so Lumen restarts itself elevated once. Your profiles and settings are kept.
+              </p>
+              <div className="settings__actions">
+                <button className="settings__action-btn" onClick={handleInstallHelper} disabled={tunBusy}>
+                  {tunBusy ? "Restarting..." : "Enable TUN Mode"}
+                </button>
+              </div>
+            </>
           ) : tunStatus?.helper_installed ? (
             <p className="settings__info">
               <span className="settings__mode-icon" aria-hidden="true">
@@ -339,6 +376,7 @@ export default function Settings({
               </div>
             </>
           )}
+          {tunError && <p className="settings__repair-status">{tunError}</p>}
         </section>
 
         {/* Advanced */}
@@ -449,7 +487,7 @@ export default function Settings({
 
         {/* About */}
         <section className="settings__section settings__section--footer">
-          <p className="settings__version">Lumen v2.5.11</p>
+          <p className="settings__version">Lumen v2.6.1</p>
           <button className="settings__action-btn">Check for Updates</button>
           <button className="settings__logout-btn" onClick={onClearKey}>
             Sign Out

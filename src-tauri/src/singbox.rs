@@ -29,13 +29,33 @@ pub struct SingboxManager {
     running: bool,
 }
 
-/// True when a process command line is the System Proxy sing-box (`config.json`),
-/// not the privileged helper TUN instance (`config-tun.json`).
+/// Resolve the bundled sing-box for callers outside this module (the TUN
+/// runtime), so both transports agree on which binary they run.
+pub fn find_singbox_binary() -> Result<PathBuf, String> {
+    SingboxManager::find_binary()
+        .map(PathBuf::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Lumen's own data directory. Every config this process starts lives under it,
+/// which is what separates our sing-box from another client's.
+const LUMEN_DATA_MARKER: &str = "io.getlumen.app";
+
+/// True when a process command line is *Lumen's* System Proxy sing-box
+/// (`config.json`), not the privileged TUN instance (`config-tun.json`) and not
+/// some other client's core.
 ///
 /// Tun cmdline example (must return false):
 ///   sing-box run -c …/io.getlumen.app/config-tun.json
 /// Proxy cmdline example (must return true):
 ///   sing-box run -c …/io.getlumen.app/config.json
+/// Foreign client example (must return false):
+///   sing-box.exe run -c C:\Users\me\v2rayN\bin\sing_box\config.json
+///
+/// The data-directory match is what keeps this safe once Lumen can run
+/// elevated for TUN: an elevated Lumen can read every process command line on
+/// the machine, so a bare `sing-box … config.json` test would let it stop
+/// v2rayN, Hiddify, or any other client sharing that ordinary file name.
 ///
 /// Note: `"config.json"` is NOT a substring of `"config-tun.json"`.
 pub fn cmdline_is_proxy_singbox(cmdline: &str) -> bool {
@@ -47,7 +67,7 @@ pub fn cmdline_is_proxy_singbox(cmdline: &str) -> bool {
     if c.contains("config-tun") {
         return false;
     }
-    c.contains("config.json")
+    c.contains(LUMEN_DATA_MARKER) && c.contains("config.json")
 }
 
 /// Scan process table for a System Proxy sing-box (never helper TUN).
@@ -393,6 +413,23 @@ mod tests {
             "sing-box run -c /tmp/config-tun-lastgood.json"
         ));
         assert!(!cmdline_is_proxy_singbox("nginx"));
+    }
+
+    /// Another client's core must survive Lumen. Once Lumen can run elevated
+    /// for Windows TUN it can read every command line on the machine, and
+    /// `config.json` is far too common a name to kill on sight.
+    #[test]
+    fn foreign_singbox_cores_are_never_treated_as_lumen() {
+        for foreign in [
+            r"C:\Users\me\v2rayN\bin\sing_box\sing-box.exe run -c C:\Users\me\v2rayN\bin\sing_box\config.json",
+            r"C:\Program Files\Hiddify\sing-box.exe run -c C:\ProgramData\Hiddify\config.json",
+            "/opt/homebrew/bin/sing-box run -c /Users/me/.config/sing-box/config.json",
+        ] {
+            assert!(
+                !cmdline_is_proxy_singbox(foreign),
+                "must not claim another client's core: {foreign}"
+            );
+        }
     }
 
     /// Regression for the Windows "screen blinks every ~5s" bug (Polina, 2026-06-10).
