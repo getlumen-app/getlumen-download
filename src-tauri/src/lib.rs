@@ -21,7 +21,9 @@ mod wbstream_balancer;
 pub mod wbstream_multipath;
 
 use std::sync::Mutex;
-use tauri::State;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, State};
 
 pub struct AppState {
     singbox: Mutex<singbox::SingboxManager>,
@@ -256,6 +258,35 @@ async fn wait_for_local_proxy_route_health() -> Result<(), String> {
     ))
 }
 
+/// Probe the local proxy route; if it is dead, drop a sticky manual exit pin
+/// and probe once more. Same failure mode and same recovery as the TUN path —
+/// a pin restored from sing-box's `cache.db` can outlive the exit it names.
+async fn ensure_local_proxy_route_health(app: &tauri::AppHandle) -> Result<(), String> {
+    let Err(first_error) = wait_for_local_proxy_route_health().await else {
+        return Ok(());
+    };
+
+    if let Err(e) = clash_api::reset_selector_to_auto().await {
+        log::warn!("could not drop the manual exit pin: {}", e);
+        return Err(first_error);
+    }
+    log::warn!(
+        "proxy route unhealthy ({}); retrying on {}",
+        first_error,
+        clash_api::AUTO_MEMBER
+    );
+    wait_for_local_proxy_route_health()
+        .await
+        .map_err(|retry_error| {
+            format!("{first_error}; auto-selected exit also failed: {retry_error}")
+        })?;
+
+    if let Err(e) = app.emit(EXIT_PIN_RESET_EVENT, clash_api::AUTO_MEMBER) {
+        log::warn!("exit pin reset event: {}", e);
+    }
+    Ok(())
+}
+
 pub fn lumen_proxy_env_pairs() -> [(&'static str, String); 3] {
     [
         (
@@ -435,7 +466,11 @@ async fn import_bootstrap_payload(
 }
 
 #[tauri::command]
-async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn connect(
+    key: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     // 1. Build config (auto-detects vless / sub URL / Proteus key)
     let promotion_urls = prepare_proxy_config(&key).await?;
 
@@ -460,7 +495,7 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
         state.singbox.lock().unwrap().stop().ok();
         return Err("sing-box started but local System Proxy listener 127.0.0.1:10808 is not accepting connections".to_string());
     }
-    if let Err(e) = wait_for_local_proxy_route_health().await {
+    if let Err(e) = ensure_local_proxy_route_health(&app).await {
         state.singbox.lock().unwrap().stop().ok();
         clear_lumen_proxy_env();
         return Err(e);
@@ -510,7 +545,7 @@ async fn connect(key: String, state: State<'_, AppState>) -> Result<(), String> 
                     clear_lumen_proxy_env();
                     return Err("Full config fetched but local System Proxy listener 127.0.0.1:10808 is not accepting connections".to_string());
                 }
-                if let Err(e) = wait_for_local_proxy_route_health().await {
+                if let Err(e) = ensure_local_proxy_route_health(&app).await {
                     state.singbox.lock().unwrap().stop().ok();
                     clear_lumen_proxy_env();
                     return Err(format!("Full config fetched but {}", e));
@@ -741,13 +776,25 @@ async fn get_traffic() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 async fn get_logs() -> Result<Vec<String>, String> {
-    let log_path = config::data_dir().join("singbox.log");
-    let fallback = if cfg!(windows) {
+    // Proxy and TUN write separate files. Show whichever session is current,
+    // otherwise a TUN failure is invisible on the Logs screen.
+    let mut candidates = vec![
+        config::data_dir().join("singbox.log"),
+        config::data_dir().join("singbox-tun.log"),
+    ];
+    candidates.sort_by_key(|path| {
+        std::cmp::Reverse(
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH),
+        )
+    });
+    candidates.push(if cfg!(windows) {
         std::env::temp_dir().join("lumen.log")
     } else {
         std::path::PathBuf::from("/tmp/lumen.log")
-    };
-    let paths = [log_path.clone(), fallback];
+    });
+    let paths = candidates;
 
     for p in &paths {
         if p.exists() {
@@ -798,6 +845,96 @@ fn open_url(url: String) -> Result<(), String> {
     }
 }
 
+/// Event the tray "Disconnect" item raises. The React shell owns teardown so
+/// tray and power button can never disagree about connection state.
+const TRAY_DISCONNECT_EVENT: &str = "lumen://tray-disconnect";
+
+/// Raised when a connect only succeeded after dropping a dead manual exit pin.
+/// The shell must forget its stored location, or it re-pins the dead exit.
+pub(crate) const EXIT_PIN_RESET_EVENT: &str = "lumen://exit-pin-reset";
+
+/// Return the machine to its normal routing: System Proxy off, its environment
+/// variables cleared, and both sing-box runtimes stopped. Used when quitting
+/// from the tray and before Lumen restarts itself with administrator rights.
+pub(crate) fn shutdown_network_runtime(app: &tauri::AppHandle) {
+    if let Err(e) = proxy::disable_system_proxy() {
+        log::warn!("shutdown: system proxy: {}", e);
+    }
+    clear_lumen_proxy_env();
+
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Err(e) = state.singbox.lock().unwrap().stop() {
+            log::warn!("shutdown: System Proxy sing-box: {}", e);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        if let Err(e) = tauri::async_runtime::block_on(tun_commands::tun_disconnect()) {
+            log::warn!("shutdown: TUN: {}", e);
+        }
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Tray icon: keeps Lumen reachable while the window is closed, which is the
+/// whole point of a VPN client that has to outlive its window.
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show Lumen", true, None::<&str>)?;
+    let disconnect = MenuItem::with_id(app, "disconnect", "Disconnect", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Lumen", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show,
+            &disconnect,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+
+    let mut builder = TrayIconBuilder::with_id("lumen")
+        .tooltip("Lumen")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "disconnect" => {
+                if let Err(e) = app.emit(TRAY_DISCONNECT_EVENT, ()) {
+                    log::warn!("tray disconnect event: {}", e);
+                }
+            }
+            "quit" => {
+                shutdown_network_runtime(app);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -807,6 +944,7 @@ pub fn run() {
         })
         .setup(|app| {
             heal_stale_lumen_proxy_env();
+            setup_tray(app.handle())?;
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -815,6 +953,17 @@ pub fn run() {
                 )?;
             }
             Ok(())
+        })
+        // Closing the window keeps the tunnel up and parks Lumen in the tray;
+        // quitting is an explicit tray action so a stray close never drops the
+        // VPN mid-download.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             detect_key,

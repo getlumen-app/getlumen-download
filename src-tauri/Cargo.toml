@@ -1,6 +1,6 @@
 [package]
 name = "lumen"
-version = "2.5.11"
+version = "2.6.1"
 description = "Lumen VPN Client"
 authors = []
 license = "GPL-3.0"
@@ -19,7 +19,7 @@ tauri-build = { version = "2.5.6", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.10.3", features = [] }
+tauri = { version = "2.10.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["process", "fs", "time", "sync", "net", "io-util"] }
@@ -36,6 +36,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 winreg = "0.55"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_Security",
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_UI_Shell",

@@ -1,5 +1,9 @@
 # Windows TUN 2.5.8
 
+> Superseded by [windows-tun-2.6.1.md](windows-tun-2.6.1.md). Kept for the
+> canary result recorded at the bottom; the runtime contract below no longer
+> describes shipping behaviour.
+
 ## Runtime contract
 
 - TUN commands compile and register on Windows.
