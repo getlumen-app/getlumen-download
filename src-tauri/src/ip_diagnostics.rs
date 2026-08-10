@@ -373,9 +373,9 @@ mod tests {
 
     #[test]
     fn parse_cloudflare_trace_reads_ip_and_country() {
-        let body = "fl=1\nh=1.1.1.1\nip=38.43.93.77\nloc=US\n";
+        let body = "fl=1\nh=1.1.1.1\nip=203.0.113.77\nloc=US\n";
         let snap = parse_cloudflare_trace(body).expect("snap");
-        assert_eq!(snap.ip, "38.43.93.77");
+        assert_eq!(snap.ip, "203.0.113.77");
         assert_eq!(snap.country.as_deref(), Some("United States"));
         assert_eq!(snap.source, "cloudflare-trace");
     }
@@ -388,14 +388,14 @@ mod tests {
     #[test]
     fn parse_ipwho_json_reads_geo_and_org() {
         let value = json!({
-            "ip": "38.43.93.77",
+            "ip": "203.0.113.77",
             "success": true,
             "country": "United States",
             "region": "Michigan",
             "connection": { "org": "Hostodo" }
         });
         let snap = parse_ipwho_json(&value).expect("snap");
-        assert_eq!(snap.ip, "38.43.93.77");
+        assert_eq!(snap.ip, "203.0.113.77");
         assert_eq!(snap.region.as_deref(), Some("Michigan"));
         assert_eq!(snap.country.as_deref(), Some("United States"));
         assert_eq!(snap.asn_org.as_deref(), Some("Hostodo"));
