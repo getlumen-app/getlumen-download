@@ -15,7 +15,14 @@ function response(body, init = {}) {
   };
 }
 
+function assertAnonymousRequest(init = {}) {
+  const headers = init.headers || {};
+  const authHeader = Object.entries(headers).find(([name]) => name.toLowerCase() === "authorization");
+  assert.equal(authHeader, undefined, "release guard requests must stay anonymous");
+}
+
 const goodFetch = async (url, init = {}) => {
+  assertAnonymousRequest(init);
   const u = String(url);
   const goodInstaller = [
     'REPO="getlumen-app/getlumen-download"',
@@ -75,6 +82,10 @@ assert.equal(good.release.tag, "v2.4.0");
 assert.equal(
   good.release.install_url,
   "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/install.sh",
+);
+assert.equal(
+  good.release.windows_installer_url,
+  "https://github.com/getlumen-app/getlumen-download/releases/download/v2.4.0/Lumen_2.4.0_x64-setup.exe",
 );
 
 const missingAsset = await checkReleasePath({

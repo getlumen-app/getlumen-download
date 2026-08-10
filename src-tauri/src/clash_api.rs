@@ -2,6 +2,27 @@ use serde_json::Value;
 
 const CLASH_API_BASE: &str = "http://127.0.0.1:9090";
 
+/// Outer selector every route and `dns-proxy` detour through.
+pub const SELECTOR_GROUP: &str = "proxy";
+/// Health-probed member of that selector.
+pub const AUTO_MEMBER: &str = "proxy-auto";
+
+/// Drop a sticky manual exit pin back to the health-probed Auto group.
+///
+/// sing-box persists selector choices in `cache.db`, so a pin outlives the
+/// process that made it. When the pinned exit stops passing traffic that pin
+/// becomes fatal rather than merely slow: `dns-proxy` detours through the same
+/// selector, so under TUN — where `hijack-dns` captures every system lookup —
+/// one dead exit takes all name resolution with it and the machine goes dark.
+/// Auto only contains members the urltest is actively probing, so recovery is
+/// worth more than honouring the pin (observed 2026-08-10: a `relay-eu-443`
+/// pin from `cache.db` killed every TUN connect).
+pub async fn reset_selector_to_auto() -> Result<(), String> {
+    select_proxy(SELECTOR_GROUP, AUTO_MEMBER)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()

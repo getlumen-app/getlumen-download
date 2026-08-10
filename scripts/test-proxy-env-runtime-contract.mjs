@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
+// Normalized so the suite also runs against a Windows checkout, where git's
+// autocrlf rewrites the tree to CRLF and every `\n`-anchored probe below would
+// silently miss.
+const read = (p) =>
+  readFileSync(new URL(`../${p}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 const lib = read("src-tauri/src/lib.rs");
 

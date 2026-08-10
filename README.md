@@ -121,14 +121,12 @@ against the Windows target, then runs:
 npm run tauri -- build --bundles nsis
 ```
 
-Lumen `v2.5.8` contains a Windows TUN canary, but ordinary Windows builds fail
-closed to System Proxy. A real Windows test showed that the first canary could
-blackhole browser traffic, so TUN is hidden and its privileged start path is
-blocked unless an operator explicitly launches Lumen with
-`LUMEN_WINDOWS_TUN_CANARY=1`. The canary records the exact elevated PID and
-executable path so cleanup never uses an unscoped process-name kill. It is not
-eligible for a public release until route/DNS readiness and recovery are
-validated on Windows.
+Lumen `v2.6.1` unlocks Windows TUN by relaunching the app through the Windows
+administrator prompt, then runs `sing-box.exe` as Lumen's child process. TUN is
+reported connected only after a real request survives the tunnel; a silent
+tunnel is torn down, normal routing is restored, and the error includes the
+latest `singbox-tun.log` lines. A dead manual exit pin is reset to Auto before
+the readiness gate gives up.
 
 WB Stream hard-whitelist fallback on Windows still needs a Windows build of
 `headless-wbstream-joiner.exe`; until that sidecar exists, Windows builds are
@@ -147,6 +145,11 @@ the live public release-path guard. The guard checks the latest GitHub release
 tag, `install.sh`, the matching macOS DMG asset, the landing installer mirror,
 and the config gateway health. It exits non-zero if any public install path is
 stale or missing.
+
+Keep desktop binaries on the public `getlumen-app/getlumen-download` release
+surface. GitHub release assets from a private repository require authenticated
+requests, so anonymous installers and landing-page download links must resolve
+to this public download repository or an equivalent public proxy.
 
 ### macOS install hygiene
 

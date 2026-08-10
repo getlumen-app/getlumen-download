@@ -11,7 +11,7 @@ export interface LocationOption {
 export const LOCATION_OPTIONS: LocationOption[] = [
   { tag: "proxy-auto", label: "Auto", flag: "⚡" },
   { tag: "hostodo-via-firstbyte", label: "USA · Hostodo", flag: "🇺🇸" },
-  { tag: "relay-eu-443", label: "Germany · Netcup", flag: "🇩🇪" },
+  { tag: "relay-eu-grpc", label: "Germany · Netcup", flag: "🇩🇪" },
   { tag: "dubai-residential", label: "Dubai", flag: "🇦🇪" },
   { tag: "izhevsk-via-firstbyte", label: "Izhevsk", flag: "🇷🇺" },
   { tag: "firstbyte-moscow-reality", label: "Moscow · FirstByte", flag: "🇷🇺" },
