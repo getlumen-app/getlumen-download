@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
 import Home from "./pages/Home";
 import Proxies from "./pages/Proxies";
 import Settings from "./pages/Settings";
@@ -480,6 +481,54 @@ export default function App() {
     await switchToPreferredMode(useTun);
   }
 
+  async function handleDisconnect() {
+    if (connectInFlight.current) return;
+    connectInFlight.current = true;
+    try {
+      localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
+      setConnectionState("disconnected");
+      setActiveTransport(null);
+      setUploadSpeed(0);
+      setDownloadSpeed(0);
+      await tearDownSession();
+      setConnectionState("disconnected");
+      setActiveTransport(null);
+    } finally {
+      connectInFlight.current = false;
+    }
+  }
+
+  // Tray "Disconnect" runs the same teardown as the power button, so the
+  // window and the tray can never disagree about connection state.
+  useEffect(() => {
+    if (!tauri.IS_TAURI) return;
+    const pending = listen("lumen://tray-disconnect", () => {
+      void handleDisconnect();
+    });
+    return () => {
+      void pending.then((unlisten) => unlisten());
+    };
+  }, [activeTransport]);
+
+  // The native side drops a pinned exit that carries no traffic. The stored
+  // location has to follow, otherwise the next proxy poll re-pins the dead exit
+  // and takes the session down again a few seconds after it recovered.
+  useEffect(() => {
+    if (!tauri.IS_TAURI) return;
+    const pending = listen<string>("lumen://exit-pin-reset", (event) => {
+      const tag = event.payload || "proxy-auto";
+      writeStoredLocation(tag);
+      setCurrentServer(tag);
+      locationAppliedRef.current = true;
+      setErrorMsg(
+        "Выбранная локация не пропускала трафик — переключил на Auto."
+      );
+    });
+    return () => {
+      void pending.then((unlisten) => unlisten());
+    };
+  }, []);
+
   async function handleConnect() {
     if (connectInFlight.current || connectionState === "connecting") return;
 
@@ -495,19 +544,7 @@ export default function App() {
     // Settings (handleVpnModeChange) — power-tap switch caused Stop→Start thrash
     // whenever activeTransport briefly disagreed with preference.
     if (shouldDisconnectOnPowerTap(connectionState)) {
-      connectInFlight.current = true;
-      try {
-        localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
-        setConnectionState("disconnected");
-        setActiveTransport(null);
-        setUploadSpeed(0);
-        setDownloadSpeed(0);
-        await tearDownSession();
-        setConnectionState("disconnected");
-        setActiveTransport(null);
-      } finally {
-        connectInFlight.current = false;
-      }
+      await handleDisconnect();
       return;
     }
 

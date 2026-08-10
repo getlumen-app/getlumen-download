@@ -103,6 +103,10 @@ struct TunPolicy {
     interface_name: &'static str,
     mtu: u16,
     strict_route: bool,
+    /// sing-box netstack. Windows clients that work in the field (v2rayN,
+    /// Clash Verge, NekoRay) ship `gvisor` as the default there: the system
+    /// TCP stack behind `mixed` is the fragile one on Wintun adapters.
+    stack: &'static str,
 }
 
 fn tun_policy_for_target(target_os: &str) -> TunPolicy {
@@ -111,11 +115,13 @@ fn tun_policy_for_target(target_os: &str) -> TunPolicy {
             interface_name: "Lumen",
             mtu: 1500,
             strict_route: true,
+            stack: "gvisor",
         },
         _ => TunPolicy {
             interface_name: "utun777",
             mtu: 9000,
             strict_route: false,
+            stack: "mixed",
         },
     }
 }
@@ -131,7 +137,7 @@ fn tun_inbounds_for_target(target_os: &str) -> serde_json::Value {
             "mtu": policy.mtu,
             "auto_route": true,
             "strict_route": policy.strict_route,
-            "stack": "mixed",
+            "stack": policy.stack,
             "endpoint_independent_nat": true,
             "sniff": true,
             "sniff_override_destination": false
@@ -921,9 +927,11 @@ pub async fn save_vless_config(
 
 /// Manual geo-picker leaves (Hiddify-like). Order is UI order.
 /// USA pin is FirstByte-only — never hostodo-via-timeweb here.
+/// Germany must avoid the :443 stream path: field reports showed that pin can
+/// pass probes while carrying no traffic on RF networks.
 const GEO_SELECTOR_TAGS: &[&str] = &[
     "hostodo-via-firstbyte",
-    "relay-eu-443",
+    "relay-eu-grpc",
     "dubai-residential",
     "izhevsk-via-firstbyte",
     "firstbyte-moscow-reality",
@@ -1323,6 +1331,10 @@ mod tests {
         assert_eq!(policy.interface_name, "Lumen");
         assert_eq!(policy.mtu, 1500);
         assert!(policy.strict_route, "Windows TUN must prevent DNS leaks");
+        assert_eq!(
+            policy.stack, "gvisor",
+            "Windows must use the netstack the working Windows clients ship"
+        );
     }
 
     #[test]
@@ -1331,6 +1343,7 @@ mod tests {
         assert_eq!(policy.interface_name, "utun777");
         assert_eq!(policy.mtu, 9000);
         assert!(!policy.strict_route);
+        assert_eq!(policy.stack, "mixed");
     }
 
     #[test]
@@ -1946,8 +1959,15 @@ mod tests {
                 },
                 {
                     "type": "vless",
-                    "tag": "dubai-residential",
+                    "tag": "relay-eu-grpc",
                     "server": "192.0.2.43",
+                    "server_port": 36743,
+                    "uuid": "00000000-0000-4000-8000-000000000017"
+                },
+                {
+                    "type": "vless",
+                    "tag": "dubai-residential",
+                    "server": "192.0.2.44",
                     "server_port": 36754,
                     "uuid": "00000000-0000-4000-8000-000000000013",
                     "flow": "xtls-rprx-vision"
@@ -1955,7 +1975,7 @@ mod tests {
                 {
                     "type": "vless",
                     "tag": "izhevsk-via-firstbyte",
-                    "server": "192.0.2.44",
+                    "server": "192.0.2.45",
                     "server_port": 36755,
                     "uuid": "00000000-0000-4000-8000-000000000014",
                     "flow": "xtls-rprx-vision"
@@ -1963,7 +1983,7 @@ mod tests {
                 {
                     "type": "vless",
                     "tag": "firstbyte-moscow-reality",
-                    "server": "192.0.2.45",
+                    "server": "192.0.2.46",
                     "server_port": 36746,
                     "uuid": "00000000-0000-4000-8000-000000000015",
                     "flow": "xtls-rprx-vision"
@@ -1971,7 +1991,7 @@ mod tests {
                 {
                     "type": "vless",
                     "tag": "proxy-moscow",
-                    "server": "192.0.2.46",
+                    "server": "192.0.2.47",
                     "server_port": 36743,
                     "uuid": "00000000-0000-4000-8000-000000000016"
                 }
@@ -2001,14 +2021,14 @@ mod tests {
             vec![
                 "proxy-auto",
                 "hostodo-via-firstbyte",
-                "relay-eu-443",
+                "relay-eu-grpc",
                 "dubai-residential",
                 "izhevsk-via-firstbyte",
                 "firstbyte-moscow-reality",
                 "proxy-moscow",
             ],
             "selector members must be Auto + geo pins; USA pin is FirstByte only \
-             (no hostodo-via-timeweb). Got {:?}",
+             and Germany pin avoids relay-eu-443. Got {:?}",
             sel
         );
 

@@ -18,6 +18,41 @@ pub struct TunStatus {
     pub singbox_running: bool,
     pub singbox_pid: Option<u32>,
     pub uptime_secs: Option<u64>,
+    /// `"macos"` | `"windows"` — lets the UI name the right unlock action.
+    pub platform: &'static str,
+    /// Windows only: the runtime exists but Lumen is not running elevated, so
+    /// enabling TUN means restarting Lumen as administrator.
+    pub needs_elevation: bool,
+}
+
+fn empty_status(installed: bool, needs_elevation: bool) -> TunStatus {
+    TunStatus {
+        helper_installed: installed,
+        helper_running: false,
+        singbox_running: false,
+        singbox_pid: None,
+        uptime_secs: None,
+        platform: PLATFORM,
+        needs_elevation,
+    }
+}
+
+#[cfg(target_os = "macos")]
+const PLATFORM: &str = "macos";
+#[cfg(target_os = "windows")]
+const PLATFORM: &str = "windows";
+
+/// True when the platform runtime is present but blocked on a privilege the
+/// user still has to grant. macOS grants it once at helper install time.
+fn needs_elevation() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        false
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tun_runtime::is_helper_installed() && !tun_runtime::is_elevated()
+    }
 }
 
 /// Get current TUN helper + sing-box status.
@@ -25,24 +60,12 @@ pub struct TunStatus {
 pub async fn tun_status() -> Result<TunStatus, String> {
     let installed = tun_runtime::is_helper_installed();
     if !installed {
-        return Ok(TunStatus {
-            helper_installed: false,
-            helper_running: false,
-            singbox_running: false,
-            singbox_pid: None,
-            uptime_secs: None,
-        });
+        return Ok(empty_status(false, false));
     }
 
     let running = tun_runtime::is_helper_running().await;
     if !running {
-        return Ok(TunStatus {
-            helper_installed: true,
-            helper_running: false,
-            singbox_running: false,
-            singbox_pid: None,
-            uptime_secs: None,
-        });
+        return Ok(empty_status(true, needs_elevation()));
     }
 
     match tun_runtime::send(Request::Status).await {
@@ -56,6 +79,8 @@ pub async fn tun_status() -> Result<TunStatus, String> {
             singbox_running: running,
             singbox_pid: pid,
             uptime_secs,
+            platform: PLATFORM,
+            needs_elevation: false,
         }),
         Ok(other) => Err(format!("Unexpected response: {:?}", other)),
         Err(e) => Err(e),
@@ -63,6 +88,11 @@ pub async fn tun_status() -> Result<TunStatus, String> {
 }
 
 /// Install/validate the platform TUN runtime.
+///
+/// macOS installs the privileged helper daemon. Windows has no daemon: the
+/// bundled sing-box is validated and, when Lumen is not elevated, Lumen
+/// restarts itself with administrator rights — the same unlock v2rayN and
+/// NekoRay use, and the only way to create a Wintun adapter.
 #[tauri::command]
 pub fn tun_install_helper(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -76,7 +106,20 @@ pub fn tun_install_helper(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let singbox = bundled_singbox_path(&app)?;
-        tun_runtime::install_helper("", &singbox.to_string_lossy())
+        tun_runtime::install_helper("", &singbox.to_string_lossy())?;
+        if tun_runtime::is_elevated() {
+            return Ok(());
+        }
+
+        // Ask for the UAC prompt first: a cancelled prompt must leave the
+        // current session exactly as it was.
+        tun_runtime::relaunch_self_elevated()?;
+
+        // Hand the machine back to its normal routing before this instance
+        // goes away; the elevated instance starts from a clean state.
+        crate::shutdown_network_runtime(&app);
+        app.exit(0);
+        Ok(())
     }
 }
 
@@ -201,9 +244,31 @@ pub async fn tun_connect(
     })
     .await?
     {
-        Response::Started { pid } => Ok(pid),
+        Response::Started { pid } => {
+            announce_dropped_exit_pin(&app);
+            Ok(pid)
+        }
         Response::Error { message } => Err(message),
         other => Err(format!("Unexpected response: {:?}", other)),
+    }
+}
+
+/// Tell the shell that readiness only succeeded after a dead manual exit pin
+/// was dropped. Without this the shell re-applies its stored location a few
+/// seconds later and puts the tunnel straight back on the dead exit.
+fn announce_dropped_exit_pin(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        use tauri::Emitter;
+        if tun_runtime::take_pin_reset() {
+            if let Err(e) = app.emit(crate::EXIT_PIN_RESET_EVENT, crate::clash_api::AUTO_MEMBER) {
+                log::warn!("exit pin reset event: {}", e);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
     }
 }
 
@@ -288,7 +353,14 @@ fn bundled_singbox_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let filename = "sing-box";
     #[cfg(target_os = "windows")]
     let filename = "sing-box.exe";
-    Ok(bin_dir(app)?.join(filename))
+    let bundled = bin_dir(app)?.join(filename);
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    // Dev runs resolve the sidecar the same way the System Proxy runtime does,
+    // so `npm run tauri dev` exercises the real TUN path instead of failing on
+    // a bundle-only resource layout.
+    crate::singbox::find_singbox_binary().or(Ok(bundled))
 }
 
 #[cfg(target_os = "macos")]
