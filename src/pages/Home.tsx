@@ -129,7 +129,7 @@ export default function Home({
 
       {restartHint && connectionState === "disconnected" && (
         <div className="home__restart-hint">
-          Restart apps opened while Lumen was connected.
+          приложения, запущенные при включённом VPN, могут требовать перезапуска
         </div>
       )}
 
