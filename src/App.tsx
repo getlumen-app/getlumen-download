@@ -321,6 +321,17 @@ export default function App() {
       healthFailures.current = decision.consecutive_failures;
       if (decision.action !== "switch_to_wbstream") return;
 
+      // WB Stream fallback is only implemented on macOS (tun_connect_wbstream_fallback
+      // is #[cfg(target_os = "macos")]). On Windows the Tauri command is not registered,
+      // so invoking it hangs or errors. Skip the fallback and surface the health failure
+      // instead of silently switching to a non-existent transport.
+      if (navigator.userAgent.includes("Windows")) {
+        console.warn(
+          "Health probe failed repeatedly on Windows; WB Stream fallback not available — staying on TUN"
+        );
+        return;
+      }
+
       fallbackSwitching.current = true;
       setConnectionState("connecting");
       setCurrentServer("WB Stream");
@@ -431,7 +442,12 @@ export default function App() {
       }
       // Control-plane / local failures must not jump to WB Stream (Doha class).
       // Hard-whitelist carrier is owned by the post-connect health monitor.
-      if (useTun && shouldAttemptWbstreamOnConnectError(msg)) {
+      // WB Stream fallback is macOS-only — skip on Windows.
+      if (
+        useTun &&
+        shouldAttemptWbstreamOnConnectError(msg) &&
+        !navigator.userAgent.includes("Windows")
+      ) {
         try {
           setCurrentServer("WB Stream");
           await tauri.tunConnectWbstreamFallback();
