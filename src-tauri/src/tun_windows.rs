@@ -273,6 +273,12 @@ async fn start(config_path: &str, singbox_path: &str) -> Result<u32, String> {
         return Err("refusing to elevate a non-sing-box executable".to_string());
     }
 
+    // Remove any stale Wintun adapter left by a crashed/killed session. Wintun
+    // adapters persist even after the process that created them is gone, and
+    // sing-box's `WintunCreateAdapter` fails with "Cannot create a file when
+    // that file already exists" when the `Lumen` adapter is still registered.
+    cleanup_stale_wintun_adapter();
+
     let log_path = tun_log_path();
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| format!("cannot create TUN log {}: {e}", log_path.display()))?;
@@ -578,6 +584,24 @@ fn silent_command(program: &Path) -> Command {
     let mut command = Command::new(program);
     command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+/// Best-effort removal of a stale Wintun adapter left behind by a crashed or
+/// killed sing-box. Wintun devices persist across process death and block the
+/// next `WintunCreateAdapter` with "Cannot create a file when that file
+/// already exists". This runs hidden, never prompts, and ignores failures —
+/// if nothing is stale the command simply does nothing.
+fn cleanup_stale_wintun_adapter() {
+    let script = r#"
+$ad = Get-CimInstance Win32_NetworkAdapter -Filter "NetConnectionID='Lumen'" -ErrorAction SilentlyContinue
+if ($ad) {
+  Disable-NetAdapter -Name 'Lumen' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+  pnputil /remove-device $ad.PNPDeviceID 2>$null | Out-Null
+}
+"#;
+    let _ = silent_command(Path::new("powershell"))
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .output();
 }
 
 #[cfg(test)]
