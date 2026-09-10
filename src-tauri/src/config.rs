@@ -1168,12 +1168,16 @@ fn build_config_from_server(
         "log": {"level": "info", "timestamp": true},
         "dns": {
             "servers": [
-                // Default resolver for everything proxied: DoH to Cloudflare,
-                // tunnelled through the VPN. Resistant to local DNS poisoning.
+                // DoH to Cloudflare — direct, NOT tunnelled through the VPN.
+                // The firstbyte-relay-httpupgrade exit cannot carry DoH to
+                // 1.1.1.1/8.8.8.8 (log shows context deadline exceeded), so
+                // detour via proxy breaks all DNS. Traffic still goes through
+                // the VPN; only the lookup is direct. The local network sees
+                // that Cloudflare DoH was queried, not which domains.
                 {
                     "tag": "dns-proxy",
                     "address": "https://1.1.1.1/dns-query",
-                    "detour": "proxy"
+                    "detour": "direct"
                 },
                 // Direct fallback — never depends on a VPN exit. sing-box picks
                 // dns-direct for RU domains (see rules) and falls back to it
