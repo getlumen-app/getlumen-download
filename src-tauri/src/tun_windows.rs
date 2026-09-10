@@ -597,6 +597,8 @@ $ad = Get-CimInstance Win32_NetworkAdapter -Filter "NetConnectionID='Lumen'" -Er
 if ($ad) {
   Disable-NetAdapter -Name 'Lumen' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
   pnputil /remove-device $ad.PNPDeviceID 2>$null | Out-Null
+} else {
+  Get-PnpDevice -Class Net -FriendlyName "*Wintun*" -ErrorAction SilentlyContinue | ForEach-Object { pnputil /remove-device $_.InstanceId 2>$null | Out-Null }
 }
 "#;
     let _ = silent_command(Path::new("powershell"))
