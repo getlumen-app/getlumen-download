@@ -4,7 +4,6 @@ use serde::Serialize;
 pub enum TransportKind {
     Tun,
     Proxy,
-    WbStream,
 }
 
 impl TransportKind {
@@ -12,7 +11,6 @@ impl TransportKind {
         match value {
             "tun" => Some(Self::Tun),
             "proxy" => Some(Self::Proxy),
-            "wbstream" => Some(Self::WbStream),
             _ => None,
         }
     }
@@ -27,15 +25,11 @@ pub enum ProbeOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MonitorAction {
     Stay,
-    SwitchToWbStream,
 }
 
 impl MonitorAction {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stay => "stay",
-            Self::SwitchToWbStream => "switch_to_wbstream",
-        }
+        "stay"
     }
 }
 
@@ -65,18 +59,14 @@ pub fn next_failure_count(previous: u8, outcome: ProbeOutcome) -> u8 {
     }
 }
 
+/// WB Stream fallback removed (2026-09-10): no alternative carrier available.
+/// Health monitor only tracks failures; no automatic transport switch.
 pub fn decide_action(
-    transport: TransportKind,
-    consecutive_failures: u8,
-    policy: HealthPolicy,
+    _transport: TransportKind,
+    _consecutive_failures: u8,
+    _policy: HealthPolicy,
 ) -> MonitorAction {
-    if transport == TransportKind::Tun
-        && consecutive_failures >= policy.consecutive_failures_to_switch
-    {
-        MonitorAction::SwitchToWbStream
-    } else {
-        MonitorAction::Stay
-    }
+    MonitorAction::Stay
 }
 
 #[cfg(test)]
@@ -94,10 +84,10 @@ mod tests {
     }
 
     #[test]
-    fn tun_switches_to_wbstream_after_threshold() {
+    fn tun_does_not_switch_after_threshold() {
         assert_eq!(
             decide_action(TransportKind::Tun, 2, HealthPolicy::default()),
-            MonitorAction::SwitchToWbStream
+            MonitorAction::Stay
         );
     }
 
@@ -110,15 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn wbstream_does_not_switch_to_itself() {
-        assert_eq!(
-            decide_action(TransportKind::WbStream, 3, HealthPolicy::default()),
-            MonitorAction::Stay
-        );
-    }
-
-    #[test]
-    fn proxy_mode_does_not_enter_tun_fallback() {
+    fn proxy_mode_does_not_switch() {
         assert_eq!(
             decide_action(TransportKind::Proxy, 3, HealthPolicy::default()),
             MonitorAction::Stay

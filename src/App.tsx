@@ -13,7 +13,6 @@ import {
   planSessionTeardown,
   readStoredConnectionIntent,
   shouldApplyEffectiveStatusSync,
-  shouldAttemptWbstreamOnConnectError,
   shouldDisconnectOnPowerTap,
   shouldSelfHealOnLaunch,
   shouldSwitchModeOnPowerTap,
@@ -319,33 +318,8 @@ export default function App() {
         probeOk
       );
       healthFailures.current = decision.consecutive_failures;
-      if (decision.action !== "switch_to_wbstream") return;
-
-      fallbackSwitching.current = true;
-      setConnectionState("connecting");
-      setCurrentServer("WB Stream");
-      setErrorMsg("");
-      try {
-        await tauri.tunDisconnect();
-      } catch (e) {
-        console.warn("TUN stop before WB Stream fallback:", e);
-      }
-      try {
-        await tauri.tunConnectWbstreamFallback();
-        if (!cancelled) {
-          healthFailures.current = 0;
-          setActiveTransport("wbstream");
-          setConnectionState("connected");
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setErrorMsg(`WB Stream fallback failed: ${e}`);
-          setConnectionState("error");
-          setActiveTransport(null);
-        }
-      } finally {
-        fallbackSwitching.current = false;
-      }
+      // WB Stream fallback removed — no alternative carrier available.
+      // Health monitor only tracks failures; no automatic transport switch.
     }
 
     const warmup = setTimeout(checkHealth, 5000);
@@ -429,26 +403,7 @@ export default function App() {
           return;
         }
       }
-      // Control-plane / local failures must not jump to WB Stream (Doha class).
-      // Hard-whitelist carrier is owned by the post-connect health monitor.
-      if (useTun && shouldAttemptWbstreamOnConnectError(msg)) {
-        try {
-          setCurrentServer("WB Stream");
-          await tauri.tunConnectWbstreamFallback();
-          setActiveTransport("wbstream");
-          localStorage.setItem(CONNECTION_INTENT_KEY, "connected");
-          setConnectionState("connected");
-          return;
-        } catch (fallbackError) {
-          console.error("WB Stream fallback error:", fallbackError);
-          setErrorMsg(`${msg}; WB Stream fallback failed: ${fallbackError}`);
-          localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
-          setConnectionState("error");
-          return;
-        }
-      } else {
-        setErrorMsg(msg);
-      }
+      setErrorMsg(msg);
       localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
       setConnectionState("error");
       setActiveTransport(null);

@@ -995,14 +995,8 @@ pub fn run() {
             tun_commands::tun_stop,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_connect,
-            #[cfg(target_os = "macos")]
-            tun_commands::tun_connect_wbstream_fallback,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_disconnect,
-            #[cfg(target_os = "macos")]
-            tun_commands::wbstream_fallback_status,
-            #[cfg(target_os = "macos")]
-            tun_commands::wbstream_stop_sidecar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

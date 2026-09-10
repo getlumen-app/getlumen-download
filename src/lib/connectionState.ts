@@ -1,5 +1,5 @@
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
-export type ActiveTransport = "tun" | "proxy" | "wbstream" | null;
+export type ActiveTransport = "tun" | "proxy" | null;
 export type StoredConnectionIntent = "connected" | "disconnected" | "unknown";
 
 export const CONNECTION_INTENT_KEY = "lumen-connection-intent";
@@ -78,7 +78,7 @@ export function shouldSwitchModeOnPowerTap(
   preferredTun: boolean
 ): boolean {
   if (connectionState !== "connected" || !activeTransport) return false;
-  const activeIsTun = activeTransport === "tun" || activeTransport === "wbstream";
+  const activeIsTun = activeTransport === "tun";
   return preferredTun !== activeIsTun;
 }
 
@@ -132,29 +132,7 @@ export function repairNetworkMessage(result: RepairNetworkResultLike): string {
 export function diagnosticRouteLabel(status: string): string {
   if (status === "connected-tun") return "TUN";
   if (status === "connected-proxy") return "System Proxy";
-  if (status === "connected-wbstream") return "WB Stream";
   return "Direct";
-}
-
-/**
- * Connect-time WB Stream auto-fallback gate.
- *
- * Hard-whitelist carrier must NOT run on control-plane / local failures
- * (blocked config host, missing cache, bad key, helper down). Those are
- * handled by cache-first Proteus connect. WB Stream is reserved for the
- * post-connect health-monitor path when TUN is up but exits look dead.
- */
-export function shouldAttemptWbstreamOnConnectError(errorMsg: string): boolean {
-  const msg = String(errorMsg || "").toLowerCase();
-  if (!msg) return false;
-  if (msg.includes("config fetch failed")) return false;
-  if (msg.includes("no usable cached config")) return false;
-  if (msg.includes("vless parse failed")) return false;
-  if (msg.includes("config build failed")) return false;
-  if (msg.includes("helper")) return false;
-  if (msg.includes("permission")) return false;
-  // Connect-time default: do not jump. Health monitor owns WB switch.
-  return false;
 }
 
 export function diagnosticLocationLabel(diagnostics: NetworkDiagnosticsLike): string {

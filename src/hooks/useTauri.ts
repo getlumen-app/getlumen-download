@@ -120,15 +120,15 @@ export async function internetHealthProbe(): Promise<boolean> {
 }
 
 export async function healthMonitorDecision(
-  transport: "tun" | "proxy" | "wbstream",
+  transport: "tun" | "proxy",
   previousFailures: number,
   probeOk: boolean
-): Promise<{ consecutive_failures: number; action: "stay" | "switch_to_wbstream" }> {
+): Promise<{ consecutive_failures: number; action: "stay" }> {
   if (!IS_TAURI) {
     const consecutive_failures = probeOk ? 0 : previousFailures + 1;
     return {
       consecutive_failures,
-      action: transport === "tun" && consecutive_failures >= 2 ? "switch_to_wbstream" : "stay",
+      action: "stay",
     };
   }
   return invoke("health_monitor_decision", {
@@ -192,11 +192,6 @@ export async function isTunAvailable(): Promise<boolean> {
 export async function tunConnect(key: string): Promise<number> {
   if (!IS_TAURI) return 0;
   return invoke<number>("tun_connect", { key });
-}
-
-export async function tunConnectWbstreamFallback(): Promise<number> {
-  if (!IS_TAURI) return 0;
-  return invoke<number>("tun_connect_wbstream_fallback");
 }
 
 export async function tunDisconnect(): Promise<void> {

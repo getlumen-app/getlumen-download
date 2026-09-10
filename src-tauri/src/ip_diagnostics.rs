@@ -41,7 +41,7 @@ impl DiagnosticsRoute {
         if status == "connected-proxy" {
             Self::ThroughLocalProxy
         } else {
-            // connected-tun / connected-wbstream / disconnected
+            // connected-tun / disconnected
             Self::DirectSocket
         }
     }

@@ -246,7 +246,6 @@ assert.equal(
 
 assert.equal(lib.diagnosticRouteLabel("connected-tun"), "TUN");
 assert.equal(lib.diagnosticRouteLabel("connected-proxy"), "System Proxy");
-assert.equal(lib.diagnosticRouteLabel("connected-wbstream"), "WB Stream");
 assert.equal(lib.diagnosticRouteLabel("disconnected"), "Direct");
 
 assert.equal(
@@ -317,38 +316,6 @@ assert.equal(
     new Date("2026-05-24T18:22:00.000Z")
   ).includes("Diagnostics error: external ip: timeout"),
   true
-);
-
-assert.equal(
-  typeof lib.shouldAttemptWbstreamOnConnectError,
-  "function",
-  "connect-error classifier must exist so control-plane failures do not jump to WB Stream"
-);
-
-assert.equal(
-  lib.shouldAttemptWbstreamOnConnectError(
-    "Config fetch failed: error sending request (no usable cached config: missing)"
-  ),
-  false,
-  "control-plane config fetch failure must NOT auto-start WB Stream"
-);
-
-assert.equal(
-  lib.shouldAttemptWbstreamOnConnectError("Config fetch failed: TLS reset"),
-  false,
-  "config fetch failure without cache still must NOT auto-start WB Stream"
-);
-
-assert.equal(
-  lib.shouldAttemptWbstreamOnConnectError("VLESS parse failed: bad link"),
-  false,
-  "bad key/link must NOT auto-start WB Stream"
-);
-
-assert.equal(
-  lib.shouldAttemptWbstreamOnConnectError("helper not running"),
-  false,
-  "local helper problems are not hard-whitelist symptoms"
 );
 
 console.log("connection-state tests OK");
