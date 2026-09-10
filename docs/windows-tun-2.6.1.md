@@ -1,9 +1,24 @@
-# Windows TUN 2.6.1
+# Windows TUN 2.6.1 / 2.6.4
 
 Supersedes [windows-tun-2.5.8.md](windows-tun-2.5.8.md), whose canary never
 passed its promotion gate and left Windows TUN permanently disabled.
 
-## What was actually broken
+## What 2.6.4 fixed
+
+violet on Windows saw "Connected" + `ERR_NAME_NOT_RESOLVED` — the TUN was up
+but DNS was dead. Cause: a manual exit pin restored from `cache.db` was dead,
+and `dns-proxy` detours through the same `proxy` selector, so the dead pin
+killed all name resolution.
+
+Changes:
+- `proxy` selector is reset to `proxy-auto` **before** the readiness probe,
+  not after 9 s of silence. A dead pin no longer gets a free pass.
+- `proxy-auto` URLTest interval: **60 s → 15 s**. A dead exit is replaced fast
+  enough that the browser does not time out first.
+- `PIN_WAS_RESET` is set whenever the pin was dropped, so the shell clears its
+  stored location and does not re-apply the dead pin.
+
+## What was actually broken (2.5.8 / 2.6.1)
 
 1. `LUMEN_WINDOWS_TUN_CANARY=1` gated both `is_helper_installed()` and the
    privileged start path, so on every ordinary Windows install `tun_status`
