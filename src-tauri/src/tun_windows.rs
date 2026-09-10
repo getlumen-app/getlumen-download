@@ -38,11 +38,6 @@ const SYNCHRONIZE_PROCESS: u32 = 0x0010_0000;
 /// attempt failed and give the machine its normal routing back.
 const READINESS_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// How long a pinned exit gets to prove itself before we fall back to Auto.
-/// Long enough for a slow-but-working exit, short enough to still leave most of
-/// the readiness budget for the retry.
-const PIN_RECOVERY_AFTER: Duration = Duration::from_secs(9);
-
 /// Set when readiness only succeeded after dropping a dead manual exit pin, so
 /// the command layer can tell the UI to stop re-applying that pin.
 static PIN_WAS_RESET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -321,12 +316,48 @@ async fn start(config_path: &str, singbox_path: &str) -> Result<u32, String> {
 /// The 2.5.8 canary reported success on process liveness alone and left the
 /// machine without internet when routing was up but the tunnel was not.
 ///
-/// Half-way through the budget a still-silent tunnel gets one self-repair
-/// attempt: drop any manual exit pin back to Auto. A pin restored from
-/// sing-box's `cache.db` is the one failure that TUN cannot survive on its own,
-/// because DNS detours through the same selector.
+/// A dead manual exit pin restored from `cache.db` is fatal for TUN: every
+/// DNS lookup detours through the same `proxy` selector, so one unreachable
+/// exit takes all name resolution with it. Reset to `proxy-auto` *before*
+/// probing — waiting for silence first lets a fast-but-dead probe succeed on
+/// a pinned exit that dies immediately after.
 async fn wait_until_tun_carries_traffic(child: &mut std::process::Child) -> Result<(), String> {
     PIN_WAS_RESET.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // 1. Wait for sing-box's Clash API before we can touch the selector.
+    let mut clash_api_ready = false;
+    let clash_probe = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .map_err(|e| format!("TUN Clash API probe unavailable: {e}"))?;
+    for _ in 0..30 {
+        if let Ok(resp) = clash_probe
+            .get("http://127.0.0.1:9090/version")
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                clash_api_ready = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // 2. Always start from the health-probed Auto group. A sticky pin can name an
+    // exit that was alive when pinned but is dead now.
+    if clash_api_ready {
+        match crate::clash_api::reset_selector_to_auto().await {
+            Ok(()) => {
+                log::info!("TUN start: selector reset to {}", crate::clash_api::AUTO_MEMBER);
+                PIN_WAS_RESET.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(e) => log::warn!("could not reset selector to auto: {e}"),
+        }
+    } else {
+        log::warn!("TUN start: Clash API not ready; cannot reset selector");
+    }
 
     let probe = reqwest::Client::builder()
         .no_proxy()
@@ -338,7 +369,6 @@ async fn wait_until_tun_carries_traffic(child: &mut std::process::Child) -> Resu
     let started = std::time::Instant::now();
     let deadline = started + READINESS_TIMEOUT;
     let mut last_error = "TUN did not become ready".to_string();
-    let mut pin_dropped = false;
 
     loop {
         if let Ok(Some(status)) = child.try_wait() {
@@ -350,37 +380,15 @@ async fn wait_until_tun_carries_traffic(child: &mut std::process::Child) -> Resu
             "https://config.getlumen.download/health",
         ] {
             match probe.get(url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if pin_dropped {
-                        PIN_WAS_RESET.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    return Ok(());
-                }
+                Ok(resp) if resp.status().is_success() => return Ok(()),
                 Ok(resp) => last_error = format!("{url} returned {}", resp.status()),
                 Err(e) => last_error = format!("{url} failed: {e}"),
             }
         }
 
-        if !pin_dropped && started.elapsed() >= PIN_RECOVERY_AFTER {
-            pin_dropped = true;
-            match crate::clash_api::reset_selector_to_auto().await {
-                Ok(()) => log::warn!(
-                    "TUN carried no traffic in {}s; dropped the manual exit pin back to {}",
-                    PIN_RECOVERY_AFTER.as_secs(),
-                    crate::clash_api::AUTO_MEMBER
-                ),
-                Err(e) => log::warn!("could not drop the manual exit pin: {e}"),
-            }
-        }
-
         if std::time::Instant::now() >= deadline {
-            let hint = if pin_dropped {
-                " (also tried the auto-selected exit)"
-            } else {
-                ""
-            };
             return Err(format!(
-                "TUN interface came up but no traffic passed through it{hint}: {last_error}"
+                "TUN interface came up but no traffic passed through it: {last_error}"
             ));
         }
         tokio::time::sleep(Duration::from_millis(700)).await;

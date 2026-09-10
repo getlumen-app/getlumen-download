@@ -1175,9 +1175,9 @@ fn build_config_from_server(
                     "address": "https://1.1.1.1/dns-query",
                     "detour": "proxy"
                 },
-                // Resolver for Russia-direct domains: DoH to Yandex over the
-                // real ISP. DoH (not plain :53) because DPI tampers with
-                // cleartext DNS even for allowed destinations in some RU networks.
+                // Direct fallback — never depends on a VPN exit. sing-box picks
+                // dns-direct for RU domains (see rules) and falls back to it
+                // when the proxied resolver is unreachable.
                 {
                     "tag": "dns-direct",
                     "address": "https://77.88.8.8/dns-query",
@@ -1249,8 +1249,9 @@ fn build_config_from_server(
 
         // Auto URLTest — same probe semantics as the former tag=proxy urltest.
         // tolerance=200: don't flap between exits for small latency differences.
-        // v2.3.4: service_names excludes TCP Reality (xtls-rprx-vision) when
-        // safer exits exist; falls back to all leaves if every exit is Reality.
+        // v2.6.3: interval 60s→15s — TUN mode depends on this group for DNS
+        // (dns-proxy detours through proxy). A dead exit must be replaced fast,
+        // not after 60 seconds of ERR_NAME_NOT_RESOLVED in the browser.
         // interrupt_exist_connections=false — probe switches must not tear down
         // active calls/streams (v2.5.2 / RF field reports).
         arr.push(serde_json::json!({
@@ -1258,7 +1259,7 @@ fn build_config_from_server(
             "tag": "proxy-auto",
             "outbounds": service_names.clone(),
             "url": "https://www.cloudflare.com/cdn-cgi/trace",
-            "interval": "60s",
+            "interval": "15s",
             "tolerance": 200,
             "idle_timeout": "30m",
             "interrupt_exist_connections": false
@@ -1723,7 +1724,20 @@ mod tests {
             "proxy-yt probe must target youtube.com, got {:?}",
             by_tag.get("proxy-yt")
         );
-        // Auto group — avoid gstatic which sometimes is regional-blocked
+        // Auto group must re-probe frequently — TUN DNS goes through this group,
+        // so a dead exit must be replaced quickly, not after a minute.
+        let proxy_auto = outbounds
+            .iter()
+            .find(|o| {
+                o.get("type").and_then(|t| t.as_str()) == Some("urltest")
+                    && o.get("tag").and_then(|t| t.as_str()) == Some("proxy-auto")
+            })
+            .expect("proxy-auto urltest must exist");
+        assert_eq!(
+            proxy_auto.get("interval").and_then(|v| v.as_str()),
+            Some("15s"),
+            "proxy-auto interval must be 15s for TUN DNS recovery"
+        );
         // and is what the v2.2.4 bug-probe happened to be using.
         let default_probe = by_tag.get("proxy-auto").cloned().unwrap_or_default();
         assert!(
