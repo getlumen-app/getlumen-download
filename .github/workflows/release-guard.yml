@@ -52,7 +52,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -Force -ItemType Directory bin | Out-Null
 
-          $singBoxVersion = "1.11.8"
+          $singBoxVersion = "1.14.0"
           $singBoxZip = "sing-box-$singBoxVersion-windows-amd64.zip"
           $singBoxUrl = "https://github.com/SagerNet/sing-box/releases/download/v$singBoxVersion/$singBoxZip"
           Invoke-WebRequest -Uri $singBoxUrl -OutFile $singBoxZip
