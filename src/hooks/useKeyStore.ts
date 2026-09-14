@@ -2,7 +2,7 @@
 /// Migrates legacy single-key (`lumen-key`) on first read.
 import { useState, useCallback, useEffect } from "react";
 
-export type KeyType = "proteus" | "vless" | "subscription_url";
+export type KeyType = "proteus" | "vless" | "hy2" | "subscription_url";
 
 export interface SavedKey {
   id: string;
@@ -23,6 +23,7 @@ function genId(): string {
 export function detectType(raw: string): KeyType {
   const s = raw.trim();
   if (s.startsWith("vless://")) return "vless";
+  if (s.startsWith("hy2://") || s.startsWith("hysteria2://")) return "hy2";
   if (s.startsWith("https://") || s.startsWith("http://")) return "subscription_url";
   return "proteus";
 }
@@ -43,6 +44,19 @@ export function defaultNameFor(raw: string, type: KeyType): string {
     // host:port from vless://uuid@host:port
     const match = s.match(/vless:\/\/[^@]+@([^:/?#]+)/);
     return match ? match[1] : "VLESS";
+  }
+  if (type === "hy2") {
+    const hash = s.indexOf("#");
+    if (hash > 0) {
+      const frag = s.slice(hash + 1);
+      try {
+        return decodeURIComponent(frag) || "HY2";
+      } catch {
+        return frag || "HY2";
+      }
+    }
+    const match = s.match(/(?:hy2|hysteria2):\/\/[^@]+@([^:/?#]+)/);
+    return match ? match[1] : "HY2";
   }
   if (type === "subscription_url") {
     try {

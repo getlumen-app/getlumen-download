@@ -45,6 +45,14 @@ export default function KeyInput({ onSubmit, onBootstrapImport }: Props) {
         label: valid ? `VLESS · ${defaultNameFor(v, type)}` : "Looks like VLESS but malformed",
       };
     }
+    if (type === "hy2") {
+      const valid = /(?:hy2|hysteria2):\/\/[^@/?#]+@[^:/?#]+/.test(v);
+      return {
+        type,
+        valid,
+        label: valid ? `HY2 · ${defaultNameFor(v, type)}` : "Looks like Hysteria2 but malformed",
+      };
+    }
     if (type === "subscription_url") {
       try {
         const host = new URL(v).hostname;
@@ -102,7 +110,7 @@ export default function KeyInput({ onSubmit, onBootstrapImport }: Props) {
 
       <form className="key-input__form" onSubmit={handleSubmit}>
         <label className="key-input__label" htmlFor="lumen-key-field">
-          Subscription key or VLESS link
+          Subscription key, VLESS or HY2 link
         </label>
         <textarea
           ref={textareaRef}
@@ -113,7 +121,7 @@ export default function KeyInput({ onSubmit, onBootstrapImport }: Props) {
             setKey(e.target.value);
             setError("");
           }}
-          placeholder="vless://… or your Proteus key"
+          placeholder="vless://…, hy2://… or your Proteus key"
           autoFocus
           spellCheck={false}
           autoComplete="off"

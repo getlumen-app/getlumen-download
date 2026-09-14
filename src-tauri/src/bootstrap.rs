@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{config, vless};
+use crate::{config, hy2, vless};
 
 type BootstrapError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -44,13 +44,22 @@ pub fn parse_bootstrap_payload(raw: &str) -> Result<BootstrapImportResult, Boots
         return Err(format!("unsupported bootstrap schema: {}", payload.schema_version).into());
     }
 
-    let vless = payload.vless.trim();
-    let parsed = vless::parse_vless(vless).map_err(|e| format!("VLESS parse failed: {}", e))?;
+    let link = payload.vless.trim();
+    let is_hy2 = link.starts_with("hy2://") || link.starts_with("hysteria2://");
+    let (key_type, default_name) = if is_hy2 {
+        let parsed =
+            hy2::parse_hy2(link).map_err(|e| format!("HY2 parse failed: {}", e))?;
+        ("hy2", parsed.name)
+    } else {
+        let parsed =
+            vless::parse_vless(link).map_err(|e| format!("VLESS parse failed: {}", e))?;
+        ("vless", parsed.name)
+    };
     let name = payload
         .name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| parsed.name.clone());
+        .unwrap_or_else(|| default_name.clone());
     let preferred_mode = match payload.preferred_mode.as_deref().unwrap_or("proxy") {
         "proxy" => "proxy",
         "tun" => "tun",
@@ -69,8 +78,8 @@ pub fn parse_bootstrap_payload(raw: &str) -> Result<BootstrapImportResult, Boots
     Ok(BootstrapImportResult {
         id: "bootstrap-imported".to_string(),
         name,
-        key_type: "vless".to_string(),
-        value: vless.to_string(),
+        key_type: key_type.to_string(),
+        value: link.to_string(),
         preferred_mode: preferred_mode.to_string(),
         full_config_url,
     })
@@ -78,13 +87,20 @@ pub fn parse_bootstrap_payload(raw: &str) -> Result<BootstrapImportResult, Boots
 
 pub async fn import_bootstrap_payload(raw: &str) -> Result<BootstrapImportResult, BootstrapError> {
     let result = parse_bootstrap_payload(raw)?;
-    let parsed =
-        vless::parse_vless(&result.value).map_err(|e| format!("VLESS parse failed: {}", e))?;
 
     // Prebuild both configs so a clean install can connect without reaching the
     // control-plane endpoints. The payload is still per-user and revocable.
-    config::save_vless_config(&parsed, config::InboundMode::Mixed).await?;
-    config::save_vless_config(&parsed, config::InboundMode::Tun).await?;
+    if result.key_type == "hy2" {
+        let parsed =
+            hy2::parse_hy2(&result.value).map_err(|e| format!("HY2 parse failed: {}", e))?;
+        config::save_hy2_config(&parsed, config::InboundMode::Mixed).await?;
+        config::save_hy2_config(&parsed, config::InboundMode::Tun).await?;
+    } else {
+        let parsed =
+            vless::parse_vless(&result.value).map_err(|e| format!("VLESS parse failed: {}", e))?;
+        config::save_vless_config(&parsed, config::InboundMode::Mixed).await?;
+        config::save_vless_config(&parsed, config::InboundMode::Tun).await?;
+    }
     config::save_bootstrap_full_config_url(result.full_config_url.as_deref())?;
 
     Ok(result)
@@ -145,6 +161,21 @@ mod tests {
             profile.full_config_url.as_deref(),
             Some("https://config.getlumen.download/proteus-sub?sub=iyp3VWoxkpnYNQO4")
         );
+    }
+
+    #[test]
+    fn bootstrap_payload_accepts_hy2_link() {
+        let raw = serde_json::json!({
+            "schema_version": "lumen.bootstrap.v1",
+            "name": "HY2 hop",
+            "vless": "hy2://synthetic-pw@198.51.100.20:36757?insecure=1&obfs=gecko&obfs-password=obfs-pw#hop"
+        })
+        .to_string();
+
+        let profile = parse_bootstrap_payload(&raw).expect("hy2 payload parses");
+        assert_eq!(profile.name, "HY2 hop");
+        assert_eq!(profile.key_type, "hy2");
+        assert_eq!(profile.preferred_mode, "proxy");
     }
 
     #[test]

@@ -59,7 +59,7 @@ export interface NetworkDiagnostics {
 export interface BootstrapImportResult {
   id: string;
   name: string;
-  key_type: "vless";
+  key_type: "vless" | "hy2";
   value: string;
   preferred_mode: "proxy" | "tun";
   full_config_url?: string | null;

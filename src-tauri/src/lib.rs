@@ -12,6 +12,7 @@ mod tun_commands;
 mod tun_helper;
 #[cfg(target_os = "windows")]
 mod tun_windows;
+mod hy2;
 mod vless;
 #[cfg(target_os = "macos")]
 mod wbstream;
@@ -66,6 +67,9 @@ fn detect_input_type(raw: &str) -> &'static str {
     let s = raw.trim();
     if s.starts_with("vless://") {
         return "vless";
+    }
+    if s.starts_with("hy2://") || s.starts_with("hysteria2://") {
+        return "hy2";
     }
     // Known internal subscription URLs — extract the ?sub= key and treat as proteus_key
     // so they always route through the CF Worker (not the raw backend).
@@ -140,6 +144,15 @@ async fn prepare_proxy_config(key: &str) -> Result<Vec<String>, String> {
         "vless" => {
             let v = vless::parse_vless(key).map_err(|e| format!("VLESS parse failed: {}", e))?;
             config::save_vless_config(&v, config::InboundMode::Mixed)
+                .await
+                .map_err(|e| format!("Config build failed: {}", e))?;
+            Ok(config::load_bootstrap_full_config_url()
+                .map(|url| vec![url])
+                .unwrap_or_default())
+        }
+        "hy2" => {
+            let h = hy2::parse_hy2(key).map_err(|e| format!("HY2 parse failed: {}", e))?;
+            config::save_hy2_config(&h, config::InboundMode::Mixed)
                 .await
                 .map_err(|e| format!("Config build failed: {}", e))?;
             Ok(config::load_bootstrap_full_config_url()
@@ -433,6 +446,19 @@ fn detect_key(input: String) -> serde_json::Value {
             }),
             Err(e) => serde_json::json!({
                 "type": "vless",
+                "valid": false,
+                "error": e,
+            }),
+        },
+        "hy2" => match hy2::parse_hy2(&input) {
+            Ok(h) => serde_json::json!({
+                "type": "hy2",
+                "valid": true,
+                "name": h.name,
+                "host": h.host,
+            }),
+            Err(e) => serde_json::json!({
+                "type": "hy2",
                 "valid": false,
                 "error": e,
             }),

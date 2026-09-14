@@ -186,6 +186,11 @@ pub async fn tun_connect(
         config::save_vless_config(&v, config::InboundMode::Tun)
             .await
             .map_err(|e| format!("Config build failed: {}", e))?;
+    } else if s.starts_with("hy2://") || s.starts_with("hysteria2://") {
+        let h = crate::hy2::parse_hy2(s).map_err(|e| format!("HY2 parse failed: {}", e))?;
+        config::save_hy2_config(&h, config::InboundMode::Tun)
+            .await
+            .map_err(|e| format!("Config build failed: {}", e))?;
     } else {
         let urls = if s.starts_with("https://") || s.starts_with("http://") {
             vec![s.to_string()]
