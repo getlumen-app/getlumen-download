@@ -849,21 +849,33 @@ pub fn build_config_from_vless(
     vless: &crate::vless::VlessConfig,
     mode: InboundMode,
 ) -> Result<serde_json::Value, ConfigError> {
-    let tag = vless_outbound_tag(&vless.name);
+    let tag = outbound_tag_from_name(&vless.name, "vless-out");
     let outbound = crate::vless::to_singbox_outbound(vless, &tag);
     // Wrap as a "server response" with single outbound and reuse the existing builder
     let pseudo_server = serde_json::json!({ "outbounds": [outbound] });
     build_config_from_server(&pseudo_server, mode)
 }
 
-/// Produce a sing-box outbound tag from a user-supplied VLESS fragment/name.
+/// Build a single-outbound sing-box config from a parsed Hysteria2 link.
+/// Same wrapper as `build_config_from_vless` — reserved-tag rules apply.
+pub fn build_config_from_hy2(
+    hy2: &crate::hy2::Hy2Config,
+    mode: InboundMode,
+) -> Result<serde_json::Value, ConfigError> {
+    let tag = outbound_tag_from_name(&hy2.name, "hy2-out");
+    let outbound = crate::hy2::to_singbox_outbound(hy2, &tag);
+    let pseudo_server = serde_json::json!({ "outbounds": [outbound] });
+    build_config_from_server(&pseudo_server, mode)
+}
+
+/// Produce a sing-box outbound tag from a user-supplied link fragment/name.
 ///
 /// Rules:
 /// - ASCII alphanumerics, dash, underscore kept; everything else collapsed to `-`
 /// - Leading/trailing `-` trimmed; multiple `-` collapsed to one
-/// - Empty / reserved names fall back to `vless-out`
+/// - Empty / reserved names fall back to the caller-provided `fallback`
 /// - Result is lowercased to keep Clash API names consistent
-fn vless_outbound_tag(raw_name: &str) -> String {
+fn outbound_tag_from_name(raw_name: &str, fallback: &str) -> String {
     const RESERVED: &[&str] = &[
         "proxy",
         "proxy-auto",
@@ -904,7 +916,7 @@ fn vless_outbound_tag(raw_name: &str) -> String {
         out.pop();
     }
     if out.is_empty() || RESERVED.contains(&out.as_str()) {
-        return "vless-out".to_string();
+        return fallback.to_string();
     }
     out
 }
@@ -922,6 +934,22 @@ pub async fn save_vless_config(
     };
     std::fs::write(&path, &final_json)?;
     log::info!("VLESS config ({:?}) saved to {}", mode, path.display());
+    Ok(final_json)
+}
+
+/// Save HY2-derived config to disk (same path as Proteus configs).
+pub async fn save_hy2_config(
+    hy2: &crate::hy2::Hy2Config,
+    mode: InboundMode,
+) -> Result<String, ConfigError> {
+    let cfg = build_config_from_hy2(hy2, mode)?;
+    let final_json = serde_json::to_string_pretty(&cfg)?;
+    let path = match mode {
+        InboundMode::Mixed => config_file_path(),
+        InboundMode::Tun => tun_config_file_path(),
+    };
+    std::fs::write(&path, &final_json)?;
+    log::info!("HY2 config ({:?}) saved to {}", mode, path.display());
     Ok(final_json)
 }
 
@@ -1384,7 +1412,7 @@ mod tests {
     #[test]
     fn vless_tag_is_never_reserved() {
         for name in &["proxy", "direct", "block", "PROXY", "Direct", ""] {
-            let t = vless_outbound_tag(name);
+            let t = outbound_tag_from_name(name, "vless-out");
             assert!(!t.is_empty(), "empty tag for {:?}", name);
             assert_ne!(t, "proxy", "tag clashes with urltest group for {:?}", name);
             assert_ne!(t, "direct");
@@ -1394,12 +1422,12 @@ mod tests {
 
     #[test]
     fn vless_tag_sanitizes_common_fragments() {
-        assert_eq!(vless_outbound_tag("user-1"), "user-1");
-        assert_eq!(vless_outbound_tag("Server-Name-01"), "server-name-01");
-        assert_eq!(vless_outbound_tag("Canada Toronto"), "canada-toronto");
-        assert_eq!(vless_outbound_tag("🚀 fast"), "fast");
-        assert_eq!(vless_outbound_tag("---"), "vless-out");
-        assert_eq!(vless_outbound_tag(""), "vless-out");
+        assert_eq!(outbound_tag_from_name("user-1", "vless-out"), "user-1");
+        assert_eq!(outbound_tag_from_name("Server-Name-01", "vless-out"), "server-name-01");
+        assert_eq!(outbound_tag_from_name("Canada Toronto", "vless-out"), "canada-toronto");
+        assert_eq!(outbound_tag_from_name("🚀 fast", "vless-out"), "fast");
+        assert_eq!(outbound_tag_from_name("---", "vless-out"), "vless-out");
+        assert_eq!(outbound_tag_from_name("", "vless-out"), "vless-out");
     }
 
     #[test]

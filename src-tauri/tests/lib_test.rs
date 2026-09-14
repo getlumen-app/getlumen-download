@@ -99,9 +99,24 @@ fn system_proxy_connect_health_checks_outbound_before_enabling_macos_proxy() {
         .find("async fn disconnect")
         .map(|offset| connect_start + offset)
         .expect("disconnect follows connect");
+    // The fail-closed check may sit inside a helper; assert the chain exists:
+    // connect -> ensure_local_proxy_route_health -> wait_for_local_proxy_route_health.
+    let ensure_start = src
+        .find("async fn ensure_local_proxy_route_health")
+        .expect("route-health ensure helper exists");
+    let ensure_end = src[ensure_start..]
+        .find("fn set_lumen_proxy_env")
+        .map(|offset| ensure_start + offset)
+        .expect("env helper follows ensure helper");
+    let ensure_body = &src[ensure_start..ensure_end];
+    assert!(
+        ensure_body.contains("wait_for_local_proxy_route_health"),
+        "ensure helper must call the local proxy route health probe"
+    );
+
     let connect_body = &src[connect_start..connect_end];
     let health_call = connect_body
-        .find("wait_for_local_proxy_route_health")
+        .find("ensure_local_proxy_route_health")
         .expect("connect must call local proxy route health");
     let enable_call = connect_body
         .find("proxy::enable_system_proxy")
