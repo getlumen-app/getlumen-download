@@ -138,9 +138,7 @@ fn tun_inbounds_for_target(target_os: &str) -> serde_json::Value {
             "auto_route": true,
             "strict_route": policy.strict_route,
             "stack": policy.stack,
-            "endpoint_independent_nat": true,
-            "sniff": true,
-            "sniff_override_destination": false
+            "endpoint_independent_nat": true
         }
     ])
 }
@@ -155,9 +153,7 @@ fn mixed_inbounds() -> serde_json::Value {
             "type": "mixed",
             "tag": "mixed-in",
             "listen": "127.0.0.1",
-            "listen_port": 10808,
-            "sniff": true,
-            "sniff_override_destination": false
+            "listen_port": 10808
         }
     ])
 }
@@ -176,6 +172,9 @@ fn enforce_requested_inbound(config: &mut serde_json::Value, mode: InboundMode) 
             ensure_dns_hijack_route_rule(config);
         }
     }
+    // Inbound sniff fields were removed in sing-box 1.13 — sniffing is now a
+    // route rule action. Insert AFTER the hijack insert so sniff lands first.
+    ensure_sniff_route_rule(config);
 }
 
 /// Insert `protocol=dns` → `action=hijack-dns` as the first route rule.
@@ -216,6 +215,39 @@ fn ensure_dns_hijack_route_rule(config: &mut serde_json::Value) {
             "action": "hijack-dns"
         }),
     );
+}
+
+/// Insert `{"action": "sniff"}` as the first route rule — the 1.14 replacement
+/// for the inbound `sniff`/`sniff_override_destination` fields removed in
+/// sing-box 1.13. Domain rules (RU-direct, Telegram, YouTube) depend on the
+/// sniffed SNI/Host. Idempotent: skips when a sniff action is already present.
+/// Call AFTER ensure_dns_hijack_route_rule so sniff lands before hijack-dns.
+fn ensure_sniff_route_rule(config: &mut serde_json::Value) {
+    if !config
+        .get("route")
+        .map(|r| r.is_object())
+        .unwrap_or(false)
+    {
+        config["route"] = serde_json::json!({});
+    }
+    if !config
+        .pointer("/route/rules")
+        .map(|r| r.is_array())
+        .unwrap_or(false)
+    {
+        config["route"]["rules"] = serde_json::json!([]);
+    }
+    let rules = config
+        .pointer_mut("/route/rules")
+        .and_then(|r| r.as_array_mut())
+        .expect("route.rules just ensured");
+
+    let already = rules
+        .iter()
+        .any(|r| r.get("action").and_then(|a| a.as_str()) == Some("sniff"));
+    if !already {
+        rules.insert(0, serde_json::json!({"action": "sniff"}));
+    }
 }
 
 pub fn tun_config_file_path() -> PathBuf {
@@ -779,12 +811,14 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
             "servers": [
                 {
                     "tag": "dns-proxy",
-                    "address": "https://1.1.1.1/dns-query",
+                    "type": "https",
+                    "server": "1.1.1.1",
                     "detour": "wbstream-local"
                 },
                 {
                     "tag": "dns-direct",
-                    "address": "https://77.88.8.8/dns-query",
+                    "type": "https",
+                    "server": "77.88.8.8",
                     "detour": "direct"
                 }
             ],
@@ -831,6 +865,7 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
     if matches!(mode, InboundMode::Tun) {
         ensure_dns_hijack_route_rule(&mut config);
     }
+    ensure_sniff_route_rule(&mut config);
     config
 }
 
@@ -1204,7 +1239,8 @@ fn build_config_from_server(
                 // that Cloudflare DoH was queried, not which domains.
                 {
                     "tag": "dns-proxy",
-                    "address": "https://1.1.1.1/dns-query",
+                    "type": "https",
+                    "server": "1.1.1.1",
                     "detour": "direct"
                 },
                 // Direct fallback — never depends on a VPN exit. sing-box picks
@@ -1212,7 +1248,8 @@ fn build_config_from_server(
                 // when the proxied resolver is unreachable.
                 {
                     "tag": "dns-direct",
-                    "address": "https://77.88.8.8/dns-query",
+                    "type": "https",
+                    "server": "77.88.8.8",
                     "detour": "direct"
                 }
             ],
@@ -1332,6 +1369,7 @@ fn build_config_from_server(
     if matches!(mode, InboundMode::Tun) {
         ensure_dns_hijack_route_rule(&mut config);
     }
+    ensure_sniff_route_rule(&mut config);
 
     log::info!(
         "Built config: {} proxy outbounds",
@@ -1622,16 +1660,24 @@ mod tests {
         let v = crate::vless::parse_vless(raw).expect("parse");
         let cfg = build_config_from_vless(&v, InboundMode::Tun).expect("build");
         let rules = cfg["route"]["rules"].as_array().expect("route.rules");
-        let first = rules.first().expect("at least one route rule");
+        // Rule 0 is the sniff action (replaces inbound sniff fields removed in
+        // sing-box 1.13); rule 1 must hijack DNS into the sing-box DNS module.
         assert_eq!(
-            first.get("protocol").and_then(|p| p.as_str()),
-            Some("dns"),
-            "first route rule must match DNS protocol"
+            rules
+                .first()
+                .and_then(|r| r.get("action"))
+                .and_then(|a| a.as_str()),
+            Some("sniff"),
+            "first route rule must sniff (replaces removed inbound sniff fields)"
         );
+        let hijack = rules
+            .iter()
+            .find(|r| r.get("action").and_then(|a| a.as_str()) == Some("hijack-dns"))
+            .expect("route rule must hijack DNS into sing-box DNS module");
         assert_eq!(
-            first.get("action").and_then(|a| a.as_str()),
-            Some("hijack-dns"),
-            "first route rule must hijack DNS into sing-box DNS module"
+            hijack.get("protocol").and_then(|p| p.as_str()),
+            Some("dns"),
+            "hijack rule must match DNS protocol"
         );
 
         // Full-config path (server returns dns+inbounds+route) must still
@@ -1648,13 +1694,18 @@ mod tests {
             "outbounds": [{"type": "direct", "tag": "direct"}]
         });
         enforce_requested_inbound(&mut full, InboundMode::Tun);
-        let full_first = full["route"]["rules"]
-            .as_array()
-            .and_then(|a| a.first())
-            .expect("full config route.rules[0]");
-        assert_eq!(
-            full_first.get("action").and_then(|a| a.as_str()),
-            Some("hijack-dns")
+        let full_rules = full["route"]["rules"].as_array().expect("full route.rules");
+        assert!(
+            full_rules
+                .iter()
+                .any(|r| r.get("action").and_then(|a| a.as_str()) == Some("sniff")),
+            "full-config path must gain the sniff route rule"
+        );
+        assert!(
+            full_rules
+                .iter()
+                .any(|r| r.get("action").and_then(|a| a.as_str()) == Some("hijack-dns")),
+            "full-config path must gain the hijack-dns route rule"
         );
     }
 
@@ -1801,18 +1852,116 @@ mod tests {
             .iter()
             .find(|i| i.get("type").and_then(|t| t.as_str()) == Some("tun"))
             .expect("tun inbound");
-        assert_eq!(
-            tun.get("sniff").and_then(|v| v.as_bool()),
-            Some(true),
-            "sniff must be on so the SNI/Host can be extracted"
+        // Inbound sniff fields were removed in sing-box 1.13 — sniffing is a
+        // route-rule action now, and must not override the destination.
+        assert!(
+            tun.get("sniff").is_none() && tun.get("sniff_override_destination").is_none(),
+            "inbound sniff fields are removed in sing-box 1.13 — use route action"
         );
-        assert_eq!(
-            tun.get("sniff_override_destination")
-                .and_then(|v| v.as_bool()),
-            Some(false),
-            "sniff_override_destination must be OFF — DNS goes through dns-proxy \
+        let rules = cfg
+            .pointer("/route/rules")
+            .and_then(|r| r.as_array())
+            .expect("route.rules");
+        let sniff = rules
+            .iter()
+            .find(|r| r.get("action").and_then(|a| a.as_str()) == Some("sniff"))
+            .expect("sniff route rule must exist so SNI/Host can be extracted");
+        assert_ne!(
+            sniff.get("override_destination").and_then(|v| v.as_bool()),
+            Some(true),
+            "sniff override_destination must be OFF — DNS goes through dns-proxy \
              (correct IPs), and override breaks Telegram anti-censorship (fake SNI)"
         );
+    }
+
+    /// sing-box 1.14 removed two legacy constructs our generated configs used:
+    /// inbound `sniff` fields (removed 1.13) and flat `address`-style DNS
+    /// servers (removed 1.14). Guard both formats so a regression fails the
+    /// test suite before it reaches a user's `sing-box check`.
+    #[test]
+    fn generated_config_uses_singbox_114_formats() {
+        let raw = "vless://00000000-0000-4000-8000-000000000007@192.0.2.70:443?type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&sni=google.com&sid=deadbeef&spx=%2F&flow=xtls-rprx-vision#u";
+        let v = crate::vless::parse_vless(raw).expect("parse");
+        for mode in [InboundMode::Mixed, InboundMode::Tun] {
+            let cfg = build_config_from_vless(&v, mode).expect("build");
+            for server in cfg
+                .pointer("/dns/servers")
+                .and_then(|s| s.as_array())
+                .expect("dns.servers")
+            {
+                assert!(
+                    server.get("type").is_some(),
+                    "{mode:?}: dns server must use typed 1.12+ format: {server:?}"
+                );
+                assert!(
+                    server.get("address").is_none(),
+                    "{mode:?}: legacy `address` DNS format removed in sing-box 1.14: {server:?}"
+                );
+            }
+            for inbound in cfg
+                .get("inbounds")
+                .and_then(|i| i.as_array())
+                .expect("inbounds")
+            {
+                assert!(
+                    inbound.get("sniff").is_none(),
+                    "{mode:?}: inbound sniff removed in sing-box 1.13: {inbound:?}"
+                );
+            }
+            let rules = cfg
+                .pointer("/route/rules")
+                .and_then(|r| r.as_array())
+                .expect("route.rules");
+            assert!(
+                rules
+                    .iter()
+                    .any(|r| r.get("action").and_then(|a| a.as_str()) == Some("sniff")),
+                "{mode:?}: sniff must live as a route rule action"
+            );
+        }
+    }
+
+    /// The real gate: generated configs must be accepted by the bundled
+    /// sing-box binary, not just have the right shape. Field removals land in
+    /// the kernel faster than our tests can predict — this catches the drift.
+    /// Skips silently when bin/sing-box is absent (CI checkout).
+    #[test]
+    fn generated_configs_pass_bundled_singbox_check() {
+        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join("bin/sing-box");
+        if !bin.exists() {
+            eprintln!("bin/sing-box not present — skipping bundled kernel check");
+            return;
+        }
+
+        let vless_raw = "vless://00000000-0000-4000-8000-000000000007@192.0.2.70:443?type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&sni=google.com&sid=deadbeef&spx=%2F&flow=xtls-rprx-vision#u";
+        let vless = crate::vless::parse_vless(vless_raw).expect("parse vless");
+        let hy2 = crate::hy2::parse_hy2(
+            "hy2://pw@192.0.2.9:36757?insecure=1&obfs=gecko&obfs-password=pw2#t",
+        )
+        .expect("parse hy2");
+
+        for mode in [InboundMode::Mixed, InboundMode::Tun] {
+            for (kind, cfg) in [
+                ("vless", build_config_from_vless(&vless, mode).expect("vless cfg")),
+                ("hy2", build_config_from_hy2(&hy2, mode).expect("hy2 cfg")),
+            ] {
+                let path = std::env::temp_dir().join(format!("lumen-check-{kind}-{mode:?}.json"));
+                std::fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+                let out = std::process::Command::new(&bin)
+                    .args(["check", "-c"])
+                    .arg(&path)
+                    .output()
+                    .expect("run sing-box check");
+                assert!(
+                    out.status.success(),
+                    "{kind} {mode:?} config rejected by bundled sing-box:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
     }
 
     /// v2.3.4 regression: Auto urltest `proxy-auto` must ALSO exclude
@@ -2725,7 +2874,7 @@ pub fn build_bootstrap_proxy_config(exit: &serde_json::Value, port: u16) -> serd
         .to_string();
     serde_json::json!({
         "log": { "level": "warn" },
-        "dns": { "servers": [{ "address": "1.1.1.1" }] },
+        "dns": { "servers": [{ "type": "udp", "server": "1.1.1.1" }] },
         "inbounds": [{
             "type": "mixed",
             "tag": "bootstrap-socks",
