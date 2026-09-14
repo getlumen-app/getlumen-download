@@ -1024,6 +1024,14 @@ pub fn run() {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             tun_commands::tun_disconnect,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Tray "Quit Lumen" is the documented exit, but Cmd+Q, Dock "Quit",
+            // and AppleEvent quit all reach RunEvent::Exit — without this the
+            // system proxy would stay pointed at a dead 127.0.0.1:10808.
+            if let tauri::RunEvent::Exit = event {
+                shutdown_network_runtime(app_handle);
+            }
+        });
 }
