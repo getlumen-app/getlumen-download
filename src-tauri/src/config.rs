@@ -820,7 +820,10 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
                     "type": "https",
                     "server": "77.88.8.8",
                     "detour": "direct"
-                }
+                },
+                // 1.14 requires an explicit domain_resolver on dial fields;
+                // "local" is the system resolver — zero dependency on exits.
+                {"tag": "local", "type": "local"}
             ],
             "rules": [
                 {"domain_suffix": wb_domains.clone(), "server": "dns-direct"}
@@ -840,7 +843,7 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
                 "server_port": local_socks_port,
                 "version": "5"
             },
-            {"type": "direct", "tag": "direct"},
+            {"type": "direct", "tag": "direct", "domain_resolver": "local"},
             {"type": "block", "tag": "block"}
         ],
         "route": {
@@ -849,7 +852,8 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
                 {"ip_cidr": wb_endpoint_cidrs.clone(), "outbound": "direct"}
             ],
             "final": "wbstream-local",
-            "auto_detect_interface": true
+            "auto_detect_interface": true,
+            "default_domain_resolver": "local"
         },
         "experimental": {
             "clash_api": {
@@ -1251,7 +1255,10 @@ fn build_config_from_server(
                     "type": "https",
                     "server": "77.88.8.8",
                     "detour": "direct"
-                }
+                },
+                // 1.14 requires an explicit domain_resolver on dial fields;
+                // "local" is the system resolver — zero dependency on exits.
+                {"tag": "local", "type": "local"}
             ],
             "rules": [
                 // Russia-direct domains resolve via the local resolver — they
@@ -1291,7 +1298,8 @@ fn build_config_from_server(
             // Everything else (web, messengers, file downloads, ...) goes
             // through the general-purpose URLTest group.
             "final": "proxy",
-            "auto_detect_interface": true
+            "auto_detect_interface": true,
+            "default_domain_resolver": "local"
         },
         "experimental": {
             "clash_api": {
@@ -1361,8 +1369,10 @@ fn build_config_from_server(
             arr.push(o.clone());
         }
 
-        // Standard outbounds.
-        arr.push(serde_json::json!({"type": "direct", "tag": "direct"}));
+        // Standard outbounds. domain_resolver is required on the direct dial
+        // field in 1.14 — a bare `direct` is rejected when a DNS server detours
+        // to it ("detour to an empty direct outbound makes no sense").
+        arr.push(serde_json::json!({"type": "direct", "tag": "direct", "domain_resolver": "local"}));
         arr.push(serde_json::json!({"type": "block", "tag": "block"}));
     }
 
@@ -1917,6 +1927,24 @@ mod tests {
                     .iter()
                     .any(|r| r.get("action").and_then(|a| a.as_str()) == Some("sniff")),
                 "{mode:?}: sniff must live as a route rule action"
+            );
+            // 1.14 runtime gate: a bare `direct` outbound is rejected when a
+            // DNS server detours to it — dial fields need domain_resolver.
+            for ob in cfg
+                .get("outbounds")
+                .and_then(|o| o.as_array())
+                .expect("outbounds")
+            {
+                if ob.get("type").and_then(|t| t.as_str()) == Some("direct") {
+                    assert!(
+                        ob.get("domain_resolver").is_some(),
+                        "{mode:?}: direct outbound needs domain_resolver in 1.14: {ob:?}"
+                    );
+                }
+            }
+            assert!(
+                cfg.pointer("/route/default_domain_resolver").is_some(),
+                "{mode:?}: route.default_domain_resolver required in 1.14"
             );
         }
     }
@@ -2874,15 +2902,18 @@ pub fn build_bootstrap_proxy_config(exit: &serde_json::Value, port: u16) -> serd
         .to_string();
     serde_json::json!({
         "log": { "level": "warn" },
-        "dns": { "servers": [{ "type": "udp", "server": "1.1.1.1" }] },
+        "dns": { "servers": [
+            { "type": "udp", "server": "1.1.1.1" },
+            { "tag": "local", "type": "local" }
+        ] },
         "inbounds": [{
             "type": "mixed",
             "tag": "bootstrap-socks",
             "listen": "127.0.0.1",
             "listen_port": port
         }],
-        "outbounds": [ exit, { "type": "direct", "tag": "direct" } ],
-        "route": { "final": tag }
+        "outbounds": [ exit, { "type": "direct", "tag": "direct", "domain_resolver": "local" } ],
+        "route": { "final": tag, "default_domain_resolver": "local" }
     })
 }
 
