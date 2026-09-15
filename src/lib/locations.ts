@@ -11,15 +11,20 @@ export interface LocationOption {
  *  Tags must match real Proteus outbounds — stale entries can't be pinned. */
 export const LOCATION_OPTIONS: LocationOption[] = [
   { tag: "proxy-auto", label: "Auto", flag: "⚡" },
-  { tag: "hostodo-via-firstbyte", label: "USA · Hostodo", flag: "🇺🇸" },
-  { tag: "hostodo-via-timeweb", label: "USA · Hostodo (Timeweb)", flag: "🇺🇸" },
-  { tag: "dubai-residential", label: "Dubai", flag: "🇦🇪" },
-  { tag: "dubai-via-firstbyte", label: "Dubai · FirstByte", flag: "🇦🇪" },
-  { tag: "relay-eu-grpc", label: "Germany · Netcup gRPC", flag: "🇷🇺→🇩🇪" },
-  { tag: "firstbyte-relay-httpupgrade", label: "Germany · FirstByte", flag: "🇷🇺→🇩🇪" },
-  { tag: "firstbyte-995-httpupgrade", label: "Germany · FirstByte :995", flag: "🇷🇺→🇩🇪" },
-  { tag: "izhevsk-via-netcup", label: "Izhevsk · Netcup", flag: "🇷🇺" },
-  { tag: "izhevsk-via-firstbyte", label: "Izhevsk · FirstByte", flag: "🇷🇺" },
+  { tag: "netcup-grpc-reality", label: "Germany · Netcup Direct", flag: "🇩🇪" },
+  { tag: "hostodo-us-grpc-reality", label: "USA · Hostodo Direct", flag: "🇺🇸" },
+  { tag: "dubai-residential", label: "Dubai Direct", flag: "🇦🇪" },
+  { tag: "firstbyte-relay-httpupgrade", label: "Germany · via FirstByte", flag: "🇷🇺→🇩🇪" },
+  { tag: "firstbyte-995-httpupgrade", label: "Germany · via FirstByte :995", flag: "🇷🇺→🇩🇪" },
+  { tag: "relay-eu-httpupgrade", label: "Germany · via Timeweb", flag: "🇷🇺→🇩🇪" },
+  { tag: "hostodo-via-firstbyte", label: "USA · via FirstByte", flag: "🇷🇺→🇺🇸" },
+  { tag: "hostodo-via-timeweb", label: "USA · via Timeweb", flag: "🇷🇺→🇺🇸" },
+  { tag: "dubai-via-firstbyte", label: "Dubai · via FirstByte", flag: "🇷🇺→🇦🇪" },
+  { tag: "msk-via-netcup", label: "Moscow · via Netcup", flag: "🇷🇺" },
+  { tag: "msk-via-firstbyte", label: "Moscow · via FirstByte", flag: "🇷🇺" },
+  { tag: "izhevsk-via-netcup", label: "Izhevsk · via Netcup", flag: "🇷🇺" },
+  { tag: "izhevsk-via-firstbyte", label: "Izhevsk · via FirstByte", flag: "🇷🇺" },
+  { tag: "whitelist-auto", label: "Emergency · Telemost", flag: "🛡" },
 ];
 
 const BY_TAG: Record<string, LocationOption> = Object.fromEntries(
@@ -37,8 +42,11 @@ const EXTRA_FLAGS: Record<string, string> = {
 const EXTRA_LABELS: Record<string, string> = {
   "izhevsk-telemost": "Izhevsk · Telemost",
   "firstbyte-tm-telemost": "FirstByte · Telemost",
+  "msk-telemost": "Moscow · Telemost",
   "netcup-tcp-reality": "Frankfurt Direct",
   "netcup-grpc-reality": "Frankfurt gRPC",
+  "hostodo-us-tcp-reality": "USA · Hostodo Direct",
+  "hostodo-us-grpc-reality": "USA · Hostodo gRPC",
 };
 
 export const GROUP_LABELS: Record<string, string> = {

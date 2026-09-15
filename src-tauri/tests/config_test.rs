@@ -28,7 +28,13 @@ fn config_source_keeps_relay_eu_443_out_of_auto_and_geo_pins() {
         "relay-eu-443 must not be the user-facing Germany pin"
     );
     assert!(
-        geo.contains("\"relay-eu-grpc\""),
-        "Germany pin should use the non-443 gRPC relay"
+        geo.contains("\"relay-eu-httpupgrade\""),
+        "Germany pin should use the live Timeweb HTTPUpgrade relay"
     );
+    for dead in ["relay-eu-grpc", "proxy-moscow", "firstbyte-moscow-reality"] {
+        assert!(
+            !geo.contains(&format!("\"{dead}\"")),
+            "{dead} is a decommissioned inbound and must not be a geo pin"
+        );
+    }
 }

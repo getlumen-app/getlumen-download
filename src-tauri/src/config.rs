@@ -265,6 +265,56 @@ fn migrate_legacy_singbox_config(config: &mut serde_json::Value) {
     let local_tag = ensure_local_dns_server(config);
     ensure_dial_resolvers(config, &local_tag);
     strip_legacy_inbound_fields(config);
+    drop_conditionless_route_rules(config);
+}
+
+/// Drop route rules whose only "condition" is an empty list (e.g. a stripped
+/// `domain_suffix: []`). In sing-box a rule with no conditions matches ALL
+/// traffic — observed 2026-09-15: the Proteus template carried such a rule to
+/// the RU exit, silently sending YouTube/Instagram to a Moscow residential IP.
+fn drop_conditionless_route_rules(config: &mut serde_json::Value) {
+    const CONDITION_KEYS: &[&str] = &[
+        "domain",
+        "domain_suffix",
+        "domain_keyword",
+        "domain_regex",
+        "ip_cidr",
+        "rule_set",
+        "geoip",
+        "geosite",
+        "network",
+        "port",
+        "port_range",
+        "protocol",
+        "ip_version",
+        "ip_is_private",
+        "source_ip_cidr",
+        "source_port",
+        "user",
+        "process_name",
+        "package_name",
+        "wifi_ssid",
+        "wifi_bssid",
+        "clash_mode",
+        "client",
+    ];
+    let Some(rules) = config
+        .get_mut("route")
+        .and_then(|r| r.get_mut("rules"))
+        .and_then(|r| r.as_array_mut())
+    else {
+        return;
+    };
+    rules.retain(|rule| {
+        if rule.get("action").is_some() {
+            return true; // sniff/hijack/predefined actions are valid without conditions
+        }
+        CONDITION_KEYS.iter().any(|k| match rule.get(*k) {
+            Some(serde_json::Value::Array(a)) => !a.is_empty(),
+            Some(v) => !v.is_null(),
+            None => false,
+        })
+    });
 }
 
 /// Convert `dns.servers[*].address` entries to typed 1.14 servers. Returns the
@@ -1050,7 +1100,68 @@ fn ensure_location_selector(config: &mut serde_json::Value) {
     let Some(mut members) = members else {
         return; // final already points at a leaf outbound — nothing to wrap
     };
-    members.insert(0, serde_json::json!(final_tag));
+    members.insert(0, serde_json::json!(final_tag.clone()));
+
+    // Whitelist fallback: when every foreign exit is unreachable (RF whitelist
+    // mode blocks all non-whitelisted IPs), only the Telemost/Yandex path can
+    // still be probed. Nesting `whitelist-auto` into the auto urltest makes
+    // failover automatic in both directions — telemost wins only while all
+    // foreign members are dead; once a foreign member probes again its lower
+    // latency takes the route back. It also joins the `proxy` selector so the
+    // user can pin it manually.
+    let has_whitelist = config
+        .get("outbounds")
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter().any(|o| {
+                o.get("tag").and_then(|t| t.as_str()) == Some("whitelist-auto")
+                    && matches!(
+                        o.get("type").and_then(|t| t.as_str()),
+                        Some("urltest") | Some("selector")
+                    )
+            })
+        })
+        .unwrap_or(false);
+    if has_whitelist {
+        if let Some(arr) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) {
+            if let Some(auto) = arr.iter_mut().find(|o| {
+                o.get("tag").and_then(|t| t.as_str()) == Some(final_tag.as_str())
+                    && o.get("type").and_then(|t| t.as_str()) == Some("urltest")
+            }) {
+                if let Some(list) = auto.get_mut("outbounds").and_then(|m| m.as_array_mut()) {
+                    if !list.iter().any(|m| m.as_str() == Some("whitelist-auto")) {
+                        list.push(serde_json::json!("whitelist-auto"));
+                    }
+                }
+            }
+        }
+        members.push(serde_json::json!("whitelist-auto"));
+    }
+
+    // Pin-only exits: leaves that must stay OUT of the auto urltest pool (RU
+    // residential minis, Telemost leaves, Moscow relay) but remain selectable
+    // in the location sheet — e.g. reaching proteus-msk-01 / izhevsk from
+    // abroad, or pinning a Telemost path by hand.
+    const PIN_ONLY_TAGS: &[&str] = &[
+        "msk-via-netcup",
+        "msk-via-firstbyte",
+        "izhevsk-telemost",
+        "firstbyte-tm-telemost",
+    ];
+    if let Some(arr) = config.get("outbounds").and_then(|o| o.as_array()) {
+        for tag in PIN_ONLY_TAGS {
+            if arr.iter().any(|o| {
+                o.get("tag").and_then(|t| t.as_str()) == Some(*tag)
+                    && !matches!(
+                        o.get("type").and_then(|t| t.as_str()),
+                        Some("urltest") | Some("selector")
+                    )
+            }) && !members.iter().any(|m| m.as_str() == Some(*tag))
+            {
+                members.push(serde_json::json!(tag));
+            }
+        }
+    }
 
     if let Some(arr) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) {
         arr.push(serde_json::json!({
@@ -1337,13 +1448,17 @@ pub async fn save_hy2_config(
 /// USA pin is FirstByte-only — never hostodo-via-timeweb here.
 /// Germany must avoid the :443 stream path: field reports showed that pin can
 /// pass probes while carrying no traffic on RF networks.
+// 2026-09-15: relay-eu-grpc / proxy-moscow / firstbyte-moscow-reality removed —
+// their Timeweb :36743 :36745 and FirstByte :36743 inbounds are decommissioned
+// (measured closed). relay-eu-httpupgrade (:36744) is the live Timeweb relay.
 const GEO_SELECTOR_TAGS: &[&str] = &[
     "hostodo-via-firstbyte",
-    "relay-eu-grpc",
+    "relay-eu-httpupgrade",
     "dubai-residential",
     "izhevsk-via-firstbyte",
-    "firstbyte-moscow-reality",
-    "proxy-moscow",
+    "izhevsk-via-netcup",
+    "msk-via-netcup",
+    "msk-via-firstbyte",
 ];
 
 /// Leaves that may appear in the selector for explicit pin, but must never
@@ -1355,9 +1470,9 @@ const AUTO_EXCLUDED_GEO_TAGS: &[&str] = &[
     "dubai-residential",
     "izhevsk-via-firstbyte",
     "izhevsk-via-netcup",
-    "firstbyte-moscow-reality",
+    "msk-via-netcup",
+    "msk-via-firstbyte",
     "hostodo-via-timeweb",
-    "proxy-moscow",
 ];
 
 /// Prefer Hostodo-via-FirstByte ahead of Hostodo-via-Timeweb inside Auto urltest.
@@ -2359,12 +2474,18 @@ mod tests {
             ],
             "outbounds": [
                 {"type": "urltest", "tag": "proxy-auto", "outbounds": ["exit-a"]},
+                {"type": "urltest", "tag": "whitelist-auto", "outbounds": ["tm-a"]},
                 {"type": "vless", "tag": "exit-a", "server": "192.0.2.1", "server_port": 443},
+                {"type": "vless", "tag": "tm-a", "server": "192.0.2.2", "server_port": 443},
+                {"type": "vless", "tag": "msk-via-netcup", "server": "192.0.2.3", "server_port": 443},
                 {"type": "direct", "tag": "direct"},
                 {"type": "block", "tag": "block"}
             ],
             "route": {
-                "rules": [{"rule_set": ["geoip-ru"], "outbound": "direct"}],
+                "rules": [
+                    {"domain_suffix": [], "outbound": "tm-a"},
+                    {"rule_set": ["geoip-ru"], "outbound": "direct"}
+                ],
                 "final": "proxy-auto"
             }
         });
@@ -2403,6 +2524,13 @@ mod tests {
             .find(|o| o.get("tag") == Some(&serde_json::json!("direct"))).unwrap();
         assert_eq!(direct["domain_resolver"], "local");
         assert_eq!(cfg.pointer("/route/default_domain_resolver").unwrap(), "dns-proxy");
+        // Condition-less rules (empty domain_suffix) are dropped — they would
+        // match ALL traffic and silently misroute everything. The sniff
+        // action rule (inbound sniff fields were removed in 1.13) survives.
+        let route_rules = cfg.pointer("/route/rules").unwrap().as_array().unwrap();
+        assert_eq!(route_rules.len(), 2, "empty-condition rule must be dropped");
+        assert_eq!(route_rules[0]["action"], "sniff");
+        assert_eq!(route_rules[1]["outbound"], "direct");
         // route.final wrapped in a `proxy` selector so Clash API can pin exits.
         assert_eq!(cfg.pointer("/route/final").unwrap(), "proxy");
         let sel = cfg.pointer("/outbounds").unwrap().as_array().unwrap().iter()
@@ -2415,6 +2543,21 @@ mod tests {
         );
         assert!(sel["outbounds"].as_array().unwrap()
             .iter().any(|m| m == &serde_json::json!("exit-a")));
+        // Whitelist fallback: whitelist-auto is pinned into the selector for
+        // manual choice AND nested into proxy-auto so urltest auto-fails over
+        // to the Telemost path when all foreign exits are unreachable.
+        assert!(sel["outbounds"].as_array().unwrap()
+            .iter().any(|m| m == &serde_json::json!("whitelist-auto")));
+        let auto = cfg.pointer("/outbounds").unwrap().as_array().unwrap().iter()
+            .find(|o| o.get("tag") == Some(&serde_json::json!("proxy-auto"))).unwrap();
+        assert_eq!(auto["outbounds"].as_array().unwrap().last().unwrap(),
+            &serde_json::json!("whitelist-auto"));
+        // Pin-only leaves (RU minis, Telemost leaves, Moscow relay) join the
+        // selector for manual pinning but never the auto urltest pool.
+        assert!(sel["outbounds"].as_array().unwrap()
+            .iter().any(|m| m == &serde_json::json!("msk-via-netcup")));
+        assert!(!auto["outbounds"].as_array().unwrap()
+            .iter().any(|m| m == &serde_json::json!("msk-via-netcup")));
         // Idempotent — a second pass must not double-wrap.
         let once = cfg.clone();
         migrate_legacy_singbox_config(&mut cfg);
@@ -2650,9 +2793,9 @@ mod tests {
                 },
                 {
                     "type": "vless",
-                    "tag": "relay-eu-grpc",
+                    "tag": "relay-eu-httpupgrade",
                     "server": "192.0.2.43",
-                    "server_port": 36743,
+                    "server_port": 36744,
                     "uuid": "00000000-0000-4000-8000-000000000017"
                 },
                 {
@@ -2673,17 +2816,17 @@ mod tests {
                 },
                 {
                     "type": "vless",
-                    "tag": "firstbyte-moscow-reality",
+                    "tag": "msk-via-netcup",
                     "server": "192.0.2.46",
-                    "server_port": 36746,
+                    "server_port": 36758,
                     "uuid": "00000000-0000-4000-8000-000000000015",
                     "flow": "xtls-rprx-vision"
                 },
                 {
                     "type": "vless",
-                    "tag": "proxy-moscow",
+                    "tag": "msk-via-firstbyte",
                     "server": "192.0.2.47",
-                    "server_port": 36743,
+                    "server_port": 36758,
                     "uuid": "00000000-0000-4000-8000-000000000016"
                 }
             ]
@@ -2712,11 +2855,11 @@ mod tests {
             vec![
                 "proxy-auto",
                 "hostodo-via-firstbyte",
-                "relay-eu-grpc",
+                "relay-eu-httpupgrade",
                 "dubai-residential",
                 "izhevsk-via-firstbyte",
-                "firstbyte-moscow-reality",
-                "proxy-moscow",
+                "msk-via-netcup",
+                "msk-via-firstbyte",
             ],
             "selector members must be Auto + geo pins; USA pin is FirstByte only \
              and Germany pin avoids relay-eu-443. Got {:?}",
@@ -2748,12 +2891,12 @@ mod tests {
             "Auto must not include Vision residential izhevsk"
         );
         assert!(
-            !auto_members.contains(&"firstbyte-moscow-reality"),
-            "Auto must not include moscow FirstByte (manual-only geo)"
+            !auto_members.contains(&"msk-via-netcup"),
+            "Auto must not include Moscow residential (manual-only geo)"
         );
         assert!(
-            !auto_members.contains(&"proxy-moscow"),
-            "Auto must not include Timeweb moscow exit (manual-only geo)"
+            !auto_members.contains(&"msk-via-firstbyte"),
+            "Auto must not include Moscow residential (manual-only geo)"
         );
         assert!(
             auto_members.contains(&"hostodo-via-firstbyte"),
