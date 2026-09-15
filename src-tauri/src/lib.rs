@@ -954,6 +954,19 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
         });
 
+    // macOS menu bar expects a monochrome template image — it recolors with
+    // the bar's light/dark styling. The full-color app icon renders there as
+    // a white rounded square, inconsistent with every other tray icon.
+    #[cfg(target_os = "macos")]
+    {
+        let icon = tauri::image::Image::new(
+            include_bytes!("../icons/trayTemplate.rgba"),
+            44,
+            44,
+        );
+        builder = builder.icon(icon).icon_as_template(true);
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
