@@ -7,15 +7,24 @@ export interface LocationOption {
   flag: string;
 }
 
-/** Ordered Home location sheet. Auto first, then geo pins. */
+/** Ordered Home location sheet. Auto first, then geo pins.
+ *  Tags must match real Proteus outbounds — stale entries can't be pinned. */
 export const LOCATION_OPTIONS: LocationOption[] = [
   { tag: "proxy-auto", label: "Auto", flag: "⚡" },
-  { tag: "hostodo-via-firstbyte", label: "USA · Hostodo", flag: "🇺🇸" },
-  { tag: "relay-eu-grpc", label: "Germany · Netcup", flag: "🇩🇪" },
-  { tag: "dubai-residential", label: "Dubai", flag: "🇦🇪" },
-  { tag: "izhevsk-via-firstbyte", label: "Izhevsk", flag: "🇷🇺" },
-  { tag: "firstbyte-moscow-reality", label: "Moscow · FirstByte", flag: "🇷🇺" },
-  { tag: "proxy-moscow", label: "Moscow · Timeweb", flag: "🇷🇺" },
+  { tag: "netcup-grpc-reality", label: "Germany · Netcup Direct", flag: "🇩🇪" },
+  { tag: "hostodo-us-grpc-reality", label: "USA · Hostodo Direct", flag: "🇺🇸" },
+  { tag: "dubai-residential", label: "Dubai Direct", flag: "🇦🇪" },
+  { tag: "firstbyte-relay-httpupgrade", label: "Germany · via FirstByte", flag: "🇷🇺→🇩🇪" },
+  { tag: "firstbyte-995-httpupgrade", label: "Germany · via FirstByte :995", flag: "🇷🇺→🇩🇪" },
+  { tag: "relay-eu-httpupgrade", label: "Germany · via Timeweb", flag: "🇷🇺→🇩🇪" },
+  { tag: "hostodo-via-firstbyte", label: "USA · via FirstByte", flag: "🇷🇺→🇺🇸" },
+  { tag: "hostodo-via-timeweb", label: "USA · via Timeweb", flag: "🇷🇺→🇺🇸" },
+  { tag: "dubai-via-firstbyte", label: "Dubai · via FirstByte", flag: "🇷🇺→🇦🇪" },
+  { tag: "msk-via-netcup", label: "Moscow · via Netcup", flag: "🇷🇺" },
+  { tag: "msk-via-firstbyte", label: "Moscow · via FirstByte", flag: "🇷🇺" },
+  { tag: "izhevsk-via-netcup", label: "Izhevsk · via Netcup", flag: "🇷🇺" },
+  { tag: "izhevsk-via-firstbyte", label: "Izhevsk · via FirstByte", flag: "🇷🇺" },
+  { tag: "whitelist-auto", label: "Emergency · Telemost", flag: "🛡" },
 ];
 
 const BY_TAG: Record<string, LocationOption> = Object.fromEntries(
@@ -24,27 +33,20 @@ const BY_TAG: Record<string, LocationOption> = Object.fromEntries(
 
 /** Extra leaf labels that appear in Proxies but are not Home geo rows. */
 const EXTRA_FLAGS: Record<string, string> = {
-  "hostodo-via-timeweb": "🇺🇸",
-  "relay-eu-httpupgrade": "🇷🇺→🇩🇪",
-  "relay-eu-grpc": "🇷🇺→🇩🇪",
-  "firstbyte-relay-httpupgrade": "🇷🇺→🇩🇪",
-  "firstbyte-995-httpupgrade": "🇷🇺→🇩🇪",
-  "izhevsk-via-netcup": "🇷🇺",
+  "izhevsk-telemost": "🇷🇺",
+  "firstbyte-tm-telemost": "🇷🇺",
   "netcup-tcp-reality": "🇩🇪",
   "netcup-grpc-reality": "🇩🇪",
-  "vless-cdn-ws": "🌐",
-  "vless-cdn-grpc": "🌐",
 };
 
 const EXTRA_LABELS: Record<string, string> = {
-  "hostodo-via-timeweb": "USA · Hostodo (Timeweb)",
-  "relay-eu-httpupgrade": "Moscow HTTPUpgrade",
-  "relay-eu-grpc": "Moscow gRPC Relay",
-  "firstbyte-relay-httpupgrade": "FirstByte Relay",
-  "firstbyte-995-httpupgrade": "FirstByte :995",
-  "izhevsk-via-netcup": "Izhevsk (via Netcup)",
+  "izhevsk-telemost": "Izhevsk · Telemost",
+  "firstbyte-tm-telemost": "FirstByte · Telemost",
+  "msk-telemost": "Moscow · Telemost",
   "netcup-tcp-reality": "Frankfurt Direct",
   "netcup-grpc-reality": "Frankfurt gRPC",
+  "hostodo-us-tcp-reality": "USA · Hostodo Direct",
+  "hostodo-us-grpc-reality": "USA · Hostodo gRPC",
 };
 
 export const GROUP_LABELS: Record<string, string> = {
@@ -52,9 +54,11 @@ export const GROUP_LABELS: Record<string, string> = {
   "proxy-auto": "Auto Select",
   "proxy-tg": "Messengers",
   "proxy-yt": "YouTube",
-  "proxy-moscow": "Russian Exit",
   "messenger-auto": "Messengers",
-  "ru-smart": "RU Smart",
+  "telegram-cdn": "Telegram",
+  "twitch-auto": "Twitch",
+  "hostodo-relay-auto": "Hostodo Relay",
+  "whitelist-auto": "Whitelist",
 };
 
 export const LOCATION_PREFERENCE_KEY = "lumen-location-tag";

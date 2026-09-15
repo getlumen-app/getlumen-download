@@ -54,8 +54,13 @@ const home = read("src/pages/Home.tsx");
   );
   assert.match(
     home,
-    /приложения, запущенные при включённом VPN, могут требовать перезапуска/,
+    /Apps launched while the VPN was on may need a restart/,
     "the hint text must use the approved soft restart warning"
+  );
+  assert.doesNotMatch(
+    home,
+    /[а-яА-ЯёЁ]/,
+    "user-facing strings are English — Lumen ships EN UI"
   );
   assert.doesNotMatch(
     home,

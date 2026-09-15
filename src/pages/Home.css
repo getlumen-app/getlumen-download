@@ -54,6 +54,7 @@
 
 .home__flag {
   font-size: 16px;
+  white-space: nowrap;
 }
 
 .home__server-name {
@@ -246,8 +247,9 @@
 
 .home__sheet-flag {
   font-size: 18px;
-  width: 28px;
+  min-width: 28px;
   text-align: center;
+  white-space: nowrap;
 }
 
 .home__sheet-label {

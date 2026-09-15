@@ -129,7 +129,7 @@ export default function Home({
 
       {restartHint && connectionState === "disconnected" && (
         <div className="home__restart-hint">
-          приложения, запущенные при включённом VPN, могут требовать перезапуска
+          Apps launched while the VPN was on may need a restart
         </div>
       )}
 

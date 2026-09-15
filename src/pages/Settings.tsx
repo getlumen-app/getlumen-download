@@ -58,9 +58,6 @@ export default function Settings({
   const [diagnostics, setDiagnostics] = useState<tauri.NetworkDiagnostics | null>(null);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
   const [diagnosticsCopyStatus, setDiagnosticsCopyStatus] = useState<string | null>(null);
-  const [bootstrapPayload, setBootstrapPayload] = useState("");
-  const [bootstrapBusy, setBootstrapBusy] = useState(false);
-  const [bootstrapStatus, setBootstrapStatus] = useState<string | null>(null);
   const [telegramProxyStatus, setTelegramProxyStatus] = useState<string | null>(null);
   type VpnMode = "tun" | "proxy";
   const [vpnMode, setVpnMode] = useState<VpnMode>(
@@ -186,26 +183,6 @@ export default function Settings({
     } catch (e) {
       console.error("copy telegram proxy:", e);
       setTelegramProxyStatus("Copy failed");
-    }
-  }
-
-  async function handleImportBootstrap() {
-    const payload = bootstrapPayload.trim();
-    if (!payload) return;
-    setBootstrapBusy(true);
-    setBootstrapStatus(null);
-    try {
-      const profile = await tauri.importBootstrapPayload(payload);
-      keyStore.replaceWithKey(profile.value, profile.name);
-      setVpnModeAndPersist(profile.preferred_mode);
-      localStorage.setItem(CONNECTION_INTENT_KEY, "disconnected");
-      setBootstrapPayload("");
-      setBootstrapStatus("Bootstrap profile imported");
-    } catch (e) {
-      console.error("bootstrap import failed:", e);
-      setBootstrapStatus(`Import failed: ${e}`);
-    } finally {
-      setBootstrapBusy(false);
     }
   }
 
@@ -386,30 +363,6 @@ export default function Settings({
           <div className="settings__actions">
             <button className="settings__action-btn">Refresh Config</button>
             <button className="settings__action-btn" onClick={onViewLogs}>View Logs</button>
-          </div>
-        </section>
-
-        <section className="settings__section">
-          <h3 className="settings__section-title">Bootstrap Import</h3>
-          <p className="settings__info">
-            Import a personal bootstrap profile when config servers are unavailable on a clean install.
-          </p>
-          <textarea
-            className="settings__bootstrap-input"
-            value={bootstrapPayload}
-            onChange={(e) => setBootstrapPayload(e.target.value)}
-            placeholder="lumen-bootstrap-v1:…"
-            rows={3}
-          />
-          <div className="settings__actions settings__actions--stack">
-            <button
-              className="settings__action-btn"
-              onClick={handleImportBootstrap}
-              disabled={!bootstrapPayload.trim() || bootstrapBusy}
-            >
-              {bootstrapBusy ? "Importing..." : "Import Bootstrap"}
-            </button>
-            {bootstrapStatus && <span className="settings__repair-status">{bootstrapStatus}</span>}
           </div>
         </section>
 
