@@ -10,16 +10,16 @@ export interface LocationOption {
 /** Ordered Home location sheet. Auto first, then geo pins.
  *  Tags must match real Proteus outbounds — stale entries can't be pinned. */
 export const LOCATION_OPTIONS: LocationOption[] = [
-  { tag: "proxy-auto", label: "Auto", flag: "\u26a1" },
-  { tag: "hostodo-via-firstbyte", label: "USA \u00b7 Hostodo", flag: "\U0001f1fa\U0001f1f8" },
-  { tag: "hostodo-via-timeweb", label: "USA \u00b7 Hostodo (Timeweb)", flag: "\U0001f1fa\U0001f1f8" },
-  { tag: "dubai-residential", label: "Dubai", flag: "\U0001f1e6\U0001f1ea" },
-  { tag: "dubai-via-firstbyte", label: "Dubai \u00b7 FirstByte", flag: "\U0001f1e6\U0001f1ea" },
-  { tag: "relay-eu-grpc", label: "Germany \u00b7 Netcup gRPC", flag: "\U0001f1f7\U0001f1fa\u2192\U0001f1e9\U0001f1ea" },
-  { tag: "firstbyte-relay-httpupgrade", label: "Germany \u00b7 FirstByte", flag: "\U0001f1f7\U0001f1fa\u2192\U0001f1e9\U0001f1ea" },
-  { tag: "firstbyte-995-httpupgrade", label: "Germany \u00b7 FirstByte :995", flag: "\U0001f1f7\U0001f1fa\u2192\U0001f1e9\U0001f1ea" },
-  { tag: "izhevsk-via-netcup", label: "Izhevsk \u00b7 Netcup", flag: "\U0001f1f7\U0001f1fa" },
-  { tag: "izhevsk-via-firstbyte", label: "Izhevsk \u00b7 FirstByte", flag: "\U0001f1f7\U0001f1fa" },
+  { tag: "proxy-auto", label: "Auto", flag: "⚡" },
+  { tag: "hostodo-via-firstbyte", label: "USA · Hostodo", flag: "🇺🇸" },
+  { tag: "hostodo-via-timeweb", label: "USA · Hostodo (Timeweb)", flag: "🇺🇸" },
+  { tag: "dubai-residential", label: "Dubai", flag: "🇦🇪" },
+  { tag: "dubai-via-firstbyte", label: "Dubai · FirstByte", flag: "🇦🇪" },
+  { tag: "relay-eu-grpc", label: "Germany · Netcup gRPC", flag: "🇷🇺→🇩🇪" },
+  { tag: "firstbyte-relay-httpupgrade", label: "Germany · FirstByte", flag: "🇷🇺→🇩🇪" },
+  { tag: "firstbyte-995-httpupgrade", label: "Germany · FirstByte :995", flag: "🇷🇺→🇩🇪" },
+  { tag: "izhevsk-via-netcup", label: "Izhevsk · Netcup", flag: "🇷🇺" },
+  { tag: "izhevsk-via-firstbyte", label: "Izhevsk · FirstByte", flag: "🇷🇺" },
 ];
 
 const BY_TAG: Record<string, LocationOption> = Object.fromEntries(
