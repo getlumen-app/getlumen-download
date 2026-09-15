@@ -250,6 +250,270 @@ fn ensure_sniff_route_rule(config: &mut serde_json::Value) {
     }
 }
 
+/// Translate legacy (pre-1.12) sing-box constructs that the Proteus config
+/// server still emits into the formats sing-box 1.14 accepts:
+/// - flat `address` DNS servers -> typed servers; `rcode://X` servers fold
+///   into `action: predefined` DNS rules
+/// - `address_resolver` -> `domain_resolver`
+/// - bare `direct` outbounds + route dial fields get an explicit resolver
+/// Idempotent — already-migrated configs pass through unchanged.
+fn migrate_legacy_singbox_config(config: &mut serde_json::Value) {
+    let rcode_tags = migrate_legacy_dns_servers(config);
+    if !rcode_tags.is_empty() {
+        rewrite_rcode_dns_rules(config, &rcode_tags);
+    }
+    let local_tag = ensure_local_dns_server(config);
+    ensure_dial_resolvers(config, &local_tag);
+    strip_legacy_inbound_fields(config);
+}
+
+/// Convert `dns.servers[*].address` entries to typed 1.14 servers. Returns the
+/// map tag -> rcode-name for `rcode://X` servers (which no longer exist as
+/// servers in 1.14 — their rules become `action: predefined`).
+fn migrate_legacy_dns_servers(
+    config: &mut serde_json::Value,
+) -> std::collections::HashMap<String, String> {
+    let mut rcode: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let Some(servers) = config
+        .pointer_mut("/dns/servers")
+        .and_then(|s| s.as_array_mut())
+    else {
+        return rcode;
+    };
+
+    let mut i = 0;
+    while i < servers.len() {
+        let Some(obj) = servers[i].as_object_mut() else {
+            i += 1;
+            continue;
+        };
+        // Fields removed in 1.14 regardless of format.
+        for gone in ["strategy", "client_subnet"] {
+            if obj.remove(gone).is_some() {
+                log::warn!("dns.servers[{i}]: dropped removed field '{gone}'");
+            }
+        }
+        if let Some(resolver) = obj.remove("address_resolver") {
+            obj.entry("domain_resolver".to_string()).or_insert(resolver);
+        }
+        let Some(addr) = obj
+            .get("address")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string())
+        else {
+            i += 1; // already typed
+            continue;
+        };
+        obj.remove("address");
+        if let Some(rc) = addr.strip_prefix("rcode://") {
+            if let Some(tag) = obj.get("tag").and_then(|t| t.as_str()) {
+                // sing-box names rcode 0 NOERROR; legacy configs write "success".
+                let name = match rc.to_uppercase().as_str() {
+                    "SUCCESS" => "NOERROR".to_string(),
+                    other => other.to_string(),
+                };
+                rcode.insert(tag.to_string(), name);
+            }
+            servers.remove(i);
+            continue;
+        }
+        let (typ, server, path, port) = split_legacy_dns_address(&addr);
+        obj.insert("type".into(), serde_json::json!(typ));
+        if let Some(s) = server {
+            obj.insert("server".into(), serde_json::json!(s));
+        }
+        if let Some(p) = path {
+            obj.insert("path".into(), serde_json::json!(p));
+        }
+        if let Some(p) = port {
+            obj.insert("server_port".into(), serde_json::json!(p));
+        }
+        i += 1;
+    }
+    rcode
+}
+
+/// `(type, server, path, server_port)` for a legacy `address` value.
+/// `https://host[:port]/path` keeps an explicit path only when non-default.
+fn split_legacy_dns_address(
+    addr: &str,
+) -> (&'static str, Option<String>, Option<String>, Option<u16>) {
+    match addr {
+        "local" => return ("local", None, None, None),
+        "fakeip" => return ("fakeip", None, None, None),
+        _ => {}
+    }
+    let (scheme, rest) = match addr.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("udp", addr), // bare IP / hostname
+    };
+    if scheme == "dhcp" {
+        return ("dhcp", None, None, None);
+    }
+    let typ = match scheme {
+        "https" => "https",
+        "h3" => "h3",
+        "tls" => "tls",
+        "quic" => "quic",
+        "tcp" => "tcp",
+        "udp" => "udp",
+        _ => {
+            log::warn!("dns server address '{addr}': unknown scheme, assuming udp");
+            "udp"
+        }
+    };
+    let (hostport, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, Some(format!("/{p}"))),
+        None => (rest, None),
+    };
+    let (host, port) = match hostport.rsplit_once(':') {
+        // Don't split IPv6 literals like [2001:db8::1].
+        Some((h, p)) if !h.ends_with('[') => (h, p.parse().ok()),
+        _ => (hostport, None),
+    };
+    (
+        typ,
+        Some(host.to_string()),
+        path.filter(|p| p != "/dns-query"),
+        port,
+    )
+}
+
+/// `{"domain": ..., "server": "dns-block"}` where dns-block was a `rcode://X`
+/// server becomes `{"domain": ..., "action": "predefined", "rcode": "X"}`.
+fn rewrite_rcode_dns_rules(
+    config: &mut serde_json::Value,
+    rcode: &std::collections::HashMap<String, String>,
+) {
+    let Some(rules) = config
+        .pointer_mut("/dns/rules")
+        .and_then(|r| r.as_array_mut())
+    else {
+        return;
+    };
+    for rule in rules.iter_mut() {
+        let tag = rule
+            .get("server")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let Some(rc) = tag.as_ref().and_then(|t| rcode.get(t)) else {
+            continue;
+        };
+        let Some(obj) = rule.as_object_mut() else {
+            continue;
+        };
+        obj.remove("server");
+        obj.insert("action".into(), serde_json::json!("predefined"));
+        obj.insert("rcode".into(), serde_json::json!(rc));
+    }
+}
+
+/// 1.14 needs a resolver for dial fields; ensure a `local` (system) DNS server
+/// exists to back `direct` dials. Returns the tag to reference.
+fn ensure_local_dns_server(config: &mut serde_json::Value) -> String {
+    let has_local = config
+        .pointer("/dns/servers")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .any(|s| s.get("type").and_then(|t| t.as_str()) == Some("local"))
+        })
+        .unwrap_or(false);
+    if has_local {
+        // Prefer the existing tag, whatever it is named.
+        if let Some(tag) = config
+            .pointer("/dns/servers")
+            .and_then(|s| s.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("local"))
+                    .and_then(|s| s.get("tag"))
+                    .and_then(|t| t.as_str())
+            })
+        {
+            return tag.to_string();
+        }
+        return "local".to_string();
+    }
+    // Pick a non-colliding tag.
+    let taken: std::collections::HashSet<String> = config
+        .pointer("/dns/servers")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.get("tag").and_then(|t| t.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let tag = if !taken.contains("local") {
+        "local".to_string()
+    } else {
+        "local-system".to_string()
+    };
+    if !config.pointer("/dns").map(|d| d.is_object()).unwrap_or(false) {
+        config["dns"] = serde_json::json!({});
+    }
+    if !config
+        .pointer("/dns/servers")
+        .map(|s| s.is_array())
+        .unwrap_or(false)
+    {
+        config["dns"]["servers"] = serde_json::json!([]);
+    }
+    config
+        .pointer_mut("/dns/servers")
+        .and_then(|s| s.as_array_mut())
+        .expect("dns.servers just ensured")
+        .push(serde_json::json!({"tag": tag, "type": "local"}));
+    tag
+}
+
+/// `direct` outbounds dial real hostnames (RU-direct domains) — point them at
+/// the local resolver. Everything else (urltest probes, rule-set downloads)
+/// resolves via `route.default_domain_resolver`; prefer the proxied DoH server
+/// (`dns-proxy` in Proteus configs) so RU DNS poisoning can't kill the probes.
+fn ensure_dial_resolvers(config: &mut serde_json::Value, local_tag: &str) {
+    if let Some(outbounds) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) {
+        for ob in outbounds.iter_mut() {
+            if ob.get("type").and_then(|t| t.as_str()) == Some("direct")
+                && ob.get("domain_resolver").is_none()
+            {
+                ob["domain_resolver"] = serde_json::json!(local_tag);
+            }
+        }
+    }
+    if config.pointer("/route/default_domain_resolver").is_none() {
+        let prefer = config
+            .pointer("/dns/servers")
+            .and_then(|s| s.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|s| s.get("tag").and_then(|t| t.as_str()) == Some("dns-proxy"))
+                    .map(|_| "dns-proxy".to_string())
+            })
+            .unwrap_or_else(|| local_tag.to_string());
+        if !config.get("route").map(|r| r.is_object()).unwrap_or(false) {
+            config["route"] = serde_json::json!({});
+        }
+        config["route"]["default_domain_resolver"] = serde_json::json!(prefer);
+    }
+}
+
+/// Inbound sniff fields were removed in sing-box 1.13 — strip them wherever a
+/// server-shipped config still carries them (sniffing lives in route rules).
+fn strip_legacy_inbound_fields(config: &mut serde_json::Value) {
+    let Some(inbounds) = config.get_mut("inbounds").and_then(|i| i.as_array_mut()) else {
+        return;
+    };
+    for inbound in inbounds.iter_mut() {
+        if let Some(obj) = inbound.as_object_mut() {
+            for f in ["sniff", "sniff_override_destination", "sniff_timeout"] {
+                obj.remove(f);
+            }
+        }
+    }
+}
+
 pub fn tun_config_file_path() -> PathBuf {
     data_dir().join("config-tun.json")
 }
@@ -309,7 +573,7 @@ pub fn load_bootstrap_full_config_url() -> Option<String> {
 
 fn load_cached_config_for_mode_from(path: &std::path::Path) -> Result<String, ConfigError> {
     let body = std::fs::read_to_string(path)?;
-    let v: serde_json::Value = serde_json::from_str(&body)?;
+    let mut v: serde_json::Value = serde_json::from_str(&body)?;
     let has_outbounds = v
         .get("outbounds")
         .and_then(|o| o.as_array())
@@ -318,7 +582,10 @@ fn load_cached_config_for_mode_from(path: &std::path::Path) -> Result<String, Co
     if !has_outbounds {
         return Err("cached config has no outbounds".into());
     }
-    Ok(body)
+    // Caches written before the sing-box 1.14 upgrade are still in the legacy
+    // format — migrate on load so the offline path survives the upgrade.
+    migrate_legacy_singbox_config(&mut v);
+    Ok(serde_json::to_string_pretty(&v)?)
 }
 
 pub fn wbstream_manifest_file_path() -> PathBuf {
@@ -507,6 +774,9 @@ async fn parse_and_cache_config_body(body: &str, mode: InboundMode) -> Result<St
     let config = if is_full_config {
         log::info!("Server returned full sing-box config");
         strip_client_side_metadata(&mut server_config);
+        migrate_legacy_singbox_config(&mut server_config);
+        ensure_location_selector(&mut server_config);
+        ensure_absolute_cache_file(&mut server_config);
         enforce_requested_inbound(&mut server_config, mode);
         server_config
     } else {
@@ -732,6 +1002,77 @@ fn strip_client_side_metadata(config: &mut serde_json::Value) {
     }
 }
 
+/// Server full configs put a urltest group in `route.final` — urltest members
+/// cannot be pinned via the Clash API (PUT /proxies/<urltest> → 400). Wrap it
+/// in a `proxy` selector so the Home/Proxies location picker works; picking the
+/// inner group member stays "Auto". Specialized groups (messenger-auto,
+/// telegram-cdn, whitelist-auto…) keep their own urltests and remain
+/// pin-independent by design.
+fn ensure_location_selector(config: &mut serde_json::Value) {
+    let already = config
+        .get("outbounds")
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter().any(|o| {
+                o.get("tag").and_then(|t| t.as_str()) == Some("proxy")
+                    && o.get("type").and_then(|t| t.as_str()) == Some("selector")
+            })
+        })
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+
+    let Some(final_tag) = config
+        .pointer("/route/final")
+        .and_then(|f| f.as_str())
+        .map(|s| s.to_string())
+    else {
+        return;
+    };
+
+    // Members of the group route.final points at — only wrap group types.
+    let members = config
+        .get("outbounds")
+        .and_then(|o| o.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|o| {
+                    o.get("tag").and_then(|t| t.as_str()) == Some(final_tag.as_str())
+                        && matches!(
+                            o.get("type").and_then(|t| t.as_str()),
+                            Some("urltest") | Some("selector")
+                        )
+                })
+                .and_then(|g| g.get("outbounds").and_then(|m| m.as_array()))
+                .cloned()
+        });
+    let Some(mut members) = members else {
+        return; // final already points at a leaf outbound — nothing to wrap
+    };
+    members.insert(0, serde_json::json!(final_tag));
+
+    if let Some(arr) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) {
+        arr.push(serde_json::json!({
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": members,
+            "default": final_tag
+        }));
+    }
+    config["route"]["final"] = serde_json::json!("proxy");
+}
+
+/// Server configs may carry a relative `cache_file.path` ("cache.db") — the
+/// selector pin persistence then depends on the spawned process cwd. Pin it to
+/// the app data dir like our generated configs do.
+fn ensure_absolute_cache_file(config: &mut serde_json::Value) {
+    let cache_path = data_dir().join("cache.db");
+    config["experimental"]["cache_file"]["enabled"] = serde_json::json!(true);
+    config["experimental"]["cache_file"]["path"] =
+        serde_json::json!(cache_path.to_string_lossy());
+}
+
 pub fn load_cached_wbstream_manifest() -> Result<serde_json::Value, ConfigError> {
     let path = wbstream_manifest_file_path();
     let body = std::fs::read_to_string(&path)?;
@@ -853,7 +1194,7 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
             ],
             "final": "wbstream-local",
             "auto_detect_interface": true,
-            "default_domain_resolver": "local"
+            "default_domain_resolver": "dns-proxy"
         },
         "experimental": {
             "clash_api": {
@@ -1299,7 +1640,7 @@ fn build_config_from_server(
             // through the general-purpose URLTest group.
             "final": "proxy",
             "auto_detect_interface": true,
-            "default_domain_resolver": "local"
+            "default_domain_resolver": "dns-proxy"
         },
         "experimental": {
             "clash_api": {
@@ -1989,6 +2330,133 @@ mod tests {
                     String::from_utf8_lossy(&out.stderr)
                 );
             }
+        }
+    }
+
+    /// sing-box 1.14 migration: the Proteus config server still ships the
+    /// legacy flat-address DNS layout. `migrate_legacy_singbox_config` must
+    /// translate it without losing routing semantics — this fixture mirrors
+    /// the real server response shape (sanitized).
+    #[test]
+    fn migrate_legacy_full_config_translates_proteus_layout() {
+        let mut cfg = serde_json::json!({
+            "dns": {
+                "servers": [
+                    {"tag": "dns-proxy", "address": "https://dns.cloudflare.com/dns-query", "address_resolver": "dns-direct", "detour": "proxy-auto"},
+                    {"tag": "dns-ru", "address": "77.88.8.8", "detour": "proxy-auto"},
+                    {"tag": "dns-direct", "address": "8.8.8.8", "detour": "direct"},
+                    {"tag": "dns-block", "address": "rcode://success"}
+                ],
+                "rules": [
+                    {"domain": ["api.oneme.ru"], "server": "dns-block"},
+                    {"domain_suffix": ["youtube.com"], "server": "dns-proxy"},
+                    {"rule_set": ["geosite-ru"], "server": "dns-ru"}
+                ],
+                "strategy": "ipv4_only"
+            },
+            "inbounds": [
+                {"type": "tun", "sniff": true, "sniff_override_destination": false}
+            ],
+            "outbounds": [
+                {"type": "urltest", "tag": "proxy-auto", "outbounds": ["exit-a"]},
+                {"type": "vless", "tag": "exit-a", "server": "192.0.2.1", "server_port": 443},
+                {"type": "direct", "tag": "direct"},
+                {"type": "block", "tag": "block"}
+            ],
+            "route": {
+                "rules": [{"rule_set": ["geoip-ru"], "outbound": "direct"}],
+                "final": "proxy-auto"
+            }
+        });
+        migrate_legacy_singbox_config(&mut cfg);
+        ensure_location_selector(&mut cfg);
+        ensure_absolute_cache_file(&mut cfg);
+        enforce_requested_inbound(&mut cfg, InboundMode::Mixed);
+
+        let servers = cfg.pointer("/dns/servers").unwrap().as_array().unwrap();
+        for s in servers {
+            assert!(s.get("address").is_none(), "legacy address left: {s:?}");
+            assert!(s.get("address_resolver").is_none(), "address_resolver left: {s:?}");
+            assert!(s.get("type").is_some(), "missing type: {s:?}");
+        }
+        // rcode://success server folded away.
+        assert!(servers.iter().all(|s| s.get("tag") != Some(&serde_json::json!("dns-block"))));
+        // Typed conversions.
+        let by_tag = |t: &str| servers.iter().find(|s| s.get("tag") == Some(&serde_json::json!(t))).cloned().unwrap();
+        assert_eq!(by_tag("dns-proxy")["type"], "https");
+        assert_eq!(by_tag("dns-proxy")["server"], "dns.cloudflare.com");
+        assert_eq!(by_tag("dns-proxy")["domain_resolver"], "dns-direct");
+        assert_eq!(by_tag("dns-ru")["type"], "udp");
+        assert_eq!(by_tag("dns-ru")["server"], "77.88.8.8");
+        assert_eq!(by_tag("dns-direct")["server"], "8.8.8.8");
+        assert_eq!(by_tag("local")["type"], "local");
+        // dns-block rule became a predefined action.
+        let rules = cfg.pointer("/dns/rules").unwrap().as_array().unwrap();
+        assert_eq!(rules[0]["action"], "predefined");
+        assert_eq!(rules[0]["rcode"], "NOERROR");
+        assert!(rules[0].get("server").is_none());
+        // Non-rcode rules keep `server` routing.
+        assert_eq!(rules[1]["server"], "dns-proxy");
+        // Dial resolvers: direct -> local, default -> dns-proxy (proxied DoH,
+        // so RU DNS poisoning can't kill urltest probes).
+        let direct = cfg.pointer("/outbounds").unwrap().as_array().unwrap().iter()
+            .find(|o| o.get("tag") == Some(&serde_json::json!("direct"))).unwrap();
+        assert_eq!(direct["domain_resolver"], "local");
+        assert_eq!(cfg.pointer("/route/default_domain_resolver").unwrap(), "dns-proxy");
+        // route.final wrapped in a `proxy` selector so Clash API can pin exits.
+        assert_eq!(cfg.pointer("/route/final").unwrap(), "proxy");
+        let sel = cfg.pointer("/outbounds").unwrap().as_array().unwrap().iter()
+            .find(|o| o.get("tag") == Some(&serde_json::json!("proxy"))).unwrap();
+        assert_eq!(sel["type"], "selector");
+        assert_eq!(sel["default"], "proxy-auto");
+        assert_eq!(
+            sel["outbounds"].as_array().unwrap()[0],
+            serde_json::json!("proxy-auto")
+        );
+        assert!(sel["outbounds"].as_array().unwrap()
+            .iter().any(|m| m == &serde_json::json!("exit-a")));
+        // Idempotent — a second pass must not double-wrap.
+        let once = cfg.clone();
+        migrate_legacy_singbox_config(&mut cfg);
+        ensure_location_selector(&mut cfg);
+        assert_eq!(once, cfg);
+    }
+
+    /// `ensure_location_selector` leaves configs whose route.final already
+    /// points at a leaf outbound untouched, and never double-wraps.
+    #[test]
+    fn location_selector_wraps_only_urltest_final() {
+        let mut leaf = serde_json::json!({
+            "outbounds": [{"type": "vless", "tag": "exit-a"}],
+            "route": {"final": "exit-a"}
+        });
+        ensure_location_selector(&mut leaf);
+        assert_eq!(leaf.pointer("/route/final").unwrap(), "exit-a");
+        assert_eq!(leaf.pointer("/outbounds").unwrap().as_array().unwrap().len(), 1);
+    }
+
+    /// Dev harness: migrates a real fetched Proteus config placed at
+    /// /tmp/proteus-full.json into /tmp/proteus-mig-{mixed,tun}.json for
+    /// manual `sing-box check`/`run` validation. Skips when absent.
+    #[test]
+    fn migrate_live_proteus_fixture() {
+        let Ok(body) = std::fs::read_to_string("/tmp/proteus-full.json") else {
+            return;
+        };
+        let mut cfg: serde_json::Value = serde_json::from_str(&body).unwrap();
+        strip_client_side_metadata(&mut cfg);
+        migrate_legacy_singbox_config(&mut cfg);
+        ensure_location_selector(&mut cfg);
+        ensure_absolute_cache_file(&mut cfg);
+        for mode in [InboundMode::Mixed, InboundMode::Tun] {
+            let mut m = cfg.clone();
+            enforce_requested_inbound(&mut m, mode);
+            let name = format!("proteus-mig-{}", if matches!(mode, InboundMode::Tun) { "tun" } else { "mixed" });
+            std::fs::write(
+                format!("/tmp/{name}.json"),
+                serde_json::to_string_pretty(&m).unwrap(),
+            )
+            .unwrap();
         }
     }
 
@@ -2913,6 +3381,7 @@ pub fn build_bootstrap_proxy_config(exit: &serde_json::Value, port: u16) -> serd
             "listen_port": port
         }],
         "outbounds": [ exit, { "type": "direct", "tag": "direct", "domain_resolver": "local" } ],
+        // No dns-proxy here — bootstrap dials only IP-based exits.
         "route": { "final": tag, "default_domain_resolver": "local" }
     })
 }
