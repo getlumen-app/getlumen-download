@@ -31,6 +31,9 @@ use tauri::{Emitter, Manager, State};
 pub struct AppState {
     singbox: Mutex<singbox::SingboxManager>,
     config_path: Mutex<Option<String>>,
+    /// TUN health probe loop; runs on the Rust side so an occluded WebView
+    /// cannot throttle it away (WKWebView suspends hidden-window timers).
+    health_task: health_monitor::MonitorSlot,
 }
 
 #[derive(serde::Serialize)]
@@ -599,6 +602,7 @@ async fn connect(
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectOutcome, String> {
+    health_monitor::stop(&state.health_task);
     // Nothing may early-return before the env cleanup. The launchd variables
     // outlive this process and get inherited by every app started next.
     let system_proxy = proxy::disable_system_proxy().map_err(|e| e.to_string());
@@ -623,6 +627,13 @@ async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectOutcome, Str
 
 #[tauri::command]
 async fn internet_health_probe() -> Result<bool, String> {
+    probe_internet().await
+}
+
+/// Shared probe used by the command above and the backend monitor loop.
+/// `.no_proxy()` keeps the request on the default route — under TUN that is
+/// the tunnel itself, which is exactly what the monitor measures.
+pub(crate) async fn probe_internet() -> Result<bool, String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(4))
@@ -674,12 +685,12 @@ fn health_monitor_decision(
 }
 
 #[cfg(target_os = "macos")]
-fn telemost_fallback_available_flag() -> bool {
+pub(crate) fn telemost_fallback_available_flag() -> bool {
     config::telemost_fallback_available()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn telemost_fallback_available_flag() -> bool {
+pub(crate) fn telemost_fallback_available_flag() -> bool {
     false
 }
 
@@ -801,7 +812,7 @@ async fn repair_network(state: State<'_, AppState>) -> Result<RepairNetworkResul
             Ok(status) => {
                 result.tun_was_running = status.singbox_running;
                 if status.singbox_running {
-                    match tun_commands::tun_disconnect().await {
+                    match tun_commands::tun_disconnect(state.clone()).await {
                         Ok(()) => result.tun_stopped = true,
                         Err(e) => result.errors.push(format!("tun: {}", e)),
                     }
@@ -927,6 +938,7 @@ pub(crate) fn shutdown_network_runtime(app: &tauri::AppHandle) {
     clear_lumen_proxy_env();
 
     if let Some(state) = app.try_state::<AppState>() {
+        health_monitor::stop(&state.health_task);
         if let Err(e) = state.singbox.lock().unwrap().stop() {
             log::warn!("shutdown: System Proxy sing-box: {}", e);
         }
@@ -934,7 +946,7 @@ pub(crate) fn shutdown_network_runtime(app: &tauri::AppHandle) {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        if let Err(e) = tauri::async_runtime::block_on(tun_commands::tun_disconnect()) {
+        if let Err(e) = tauri::async_runtime::block_on(tun_commands::stop_tun_runtime()) {
             log::warn!("shutdown: TUN: {}", e);
         }
     }
@@ -1018,6 +1030,7 @@ pub fn run() {
         .manage(AppState {
             singbox: Mutex::new(singbox::SingboxManager::new()),
             config_path: Mutex::new(None),
+            health_task: health_monitor::new_monitor_slot(),
         })
         .setup(|app| {
             heal_stale_lumen_proxy_env();

@@ -61,8 +61,6 @@ export default function App() {
   const [activeTransport, setActiveTransport] = useState<ActiveTransport>(null);
   const [restartHint, setRestartHint] = useState(false);
   const trafficInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-  const healthFailures = useRef(0);
-  const fallbackSwitching = useRef(false);
   const launchSelfHealChecked = useRef(false);
   const locationAppliedRef = useRef(false);
   const connectInFlight = useRef(false);
@@ -302,46 +300,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [connectionState, fetchProxyData]);
 
-  useEffect(() => {
-    if (connectionState !== "connected" || activeTransport !== "tun") {
-      healthFailures.current = 0;
-      return;
-    }
-
-    let cancelled = false;
-    async function checkHealth() {
-      if (cancelled || fallbackSwitching.current || activeTransport !== "tun") return;
-      const probeOk = await tauri.internetHealthProbe();
-      const decision = await tauri.healthMonitorDecision(
-        "tun",
-        healthFailures.current,
-        probeOk
-      );
-      healthFailures.current = decision.consecutive_failures;
-      if (decision.action === "activate_fallback") {
-        fallbackSwitching.current = true;
-        try {
-          const port = await tauri.startTelemostFallback();
-          console.warn(`Telemost fallback active: local SOCKS on ${port}`);
-        } catch (e) {
-          console.error("Telemost fallback start failed:", e);
-        } finally {
-          // Allow a retry on the next probe cycle if the start failed; when it
-          // succeeded the call is idempotent and the urltest owns routing.
-          fallbackSwitching.current = false;
-        }
-      }
-    }
-
-    const warmup = setTimeout(checkHealth, 5000);
-    const interval = setInterval(checkHealth, 10000);
-    return () => {
-      cancelled = true;
-      clearTimeout(warmup);
-      clearInterval(interval);
-    };
-  }, [connectionState, activeTransport]);
-
   async function tearDownSession() {
     const tunStatus = await tauri.tunStatus();
     const plan = planSessionTeardown(activeTransport, tunStatus);
@@ -367,7 +325,6 @@ export default function App() {
     setProxyGroups([]);
     setCurrentServer(readStoredLocation());
     locationAppliedRef.current = false;
-    healthFailures.current = 0;
   }
 
   async function connectWithPreferredMode(useTun: boolean) {
@@ -384,7 +341,6 @@ export default function App() {
       if (useTun) {
         await tauri.tunConnect(accessKey);
         setActiveTransport("tun");
-        healthFailures.current = 0;
       } else {
         await tauri.connect(accessKey);
         setActiveTransport("proxy");
@@ -401,7 +357,6 @@ export default function App() {
             console.warn("System Proxy route unhealthy; falling back to TUN");
             await tauri.tunConnect(accessKey);
             setActiveTransport("tun");
-            healthFailures.current = 0;
             setConnectionState("connected");
             setCurrentServer(readStoredLocation());
             return;
