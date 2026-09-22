@@ -31,6 +31,7 @@ rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sh
 sha2 = "0.10"
 rand = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

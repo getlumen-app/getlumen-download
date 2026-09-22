@@ -60,6 +60,7 @@ export default function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [activeTransport, setActiveTransport] = useState<ActiveTransport>(null);
   const [restartHint, setRestartHint] = useState(false);
+  const [fallbackActive, setFallbackActive] = useState(false);
   const trafficInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const launchSelfHealChecked = useRef(false);
   const locationAppliedRef = useRef(false);
@@ -325,6 +326,7 @@ export default function App() {
     setProxyGroups([]);
     setCurrentServer(readStoredLocation());
     locationAppliedRef.current = false;
+    setFallbackActive(false);
   }
 
   async function connectWithPreferredMode(useTun: boolean) {
@@ -332,6 +334,7 @@ export default function App() {
     setConnectionState("connecting");
     setErrorMsg("");
     setRestartHint(false);
+    setFallbackActive(false);
     locationAppliedRef.current = false;
     // Native connect starts the transport before the command resolves; mark
     // intent first so status sync never tears down that in-flight session.
@@ -450,6 +453,19 @@ export default function App() {
     };
   }, []);
 
+  // Backend health monitor activated the Telemost fallback — show it on Home.
+  // The event fires once per TUN session after the sidecars come up.
+  useEffect(() => {
+    if (!tauri.IS_TAURI) return;
+    const pending = listen<number>("lumen://telemost-fallback-active", (event) => {
+      setFallbackActive(true);
+      console.warn(`Telemost fallback active: local SOCKS on ${event.payload}`);
+    });
+    return () => {
+      void pending.then((unlisten) => unlisten());
+    };
+  }, []);
+
   async function handleConnect() {
     if (connectInFlight.current || connectionState === "connecting") return;
 
@@ -562,6 +578,7 @@ export default function App() {
             onSelectLocation={handleSelectLocation}
             errorMsg={errorMsg}
             restartHint={restartHint}
+            fallbackActive={fallbackActive}
           />
         )}
         {tab === "proxies" && (

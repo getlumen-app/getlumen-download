@@ -1027,6 +1027,13 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // One instance only: a second Lumen (release + dev build, or a
+        // duplicate launch) fought over the single privileged helper —
+        // alternating Start/Stop requests tore down each other's sing-box
+        // (2026-09-22). The second launch focuses the running window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .manage(AppState {
             singbox: Mutex::new(singbox::SingboxManager::new()),
             config_path: Mutex::new(None),
