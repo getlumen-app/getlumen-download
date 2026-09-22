@@ -642,11 +642,19 @@ pub fn wbstream_manifest_file_path() -> PathBuf {
     data_dir().join("wbstream-manifest.json")
 }
 
+pub fn telemost_manifest_file_path() -> PathBuf {
+    data_dir().join("telemost-manifest.json")
+}
+
 pub const WBSTREAM_LOCAL_SOCKS_PORT: u16 = 11080;
 pub const WBSTREAM_LOCAL_BALANCER_PORT: u16 = 11079;
 pub const WBSTREAM_LOCAL_MULTIPATH_PORT: u16 = 11078;
 pub const WBSTREAM_REMOTE_MULTIPATH_PORT: u16 = 19095;
 pub const WBSTREAM_MAX_ROOMS: usize = 3;
+
+pub const TELEMOST_LOCAL_SOCKS_PORT: u16 = 11090;
+pub const TELEMOST_LOCAL_BALANCER_PORT: u16 = 11097;
+pub const TELEMOST_MAX_ROOMS: usize = 3;
 
 /// Fetch config from server, generate working config, cache to disk.
 /// Server returns outbounds (proxies). Client wraps them with DNS, routing, inbounds.
@@ -811,7 +819,9 @@ async fn parse_and_cache_config_body(body: &str, mode: InboundMode) -> Result<St
     let mut server_config: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("Invalid config JSON: {}", e))?;
     cache_wbstream_manifest_from_server(&server_config);
+    cache_telemost_manifest_from_server(&server_config);
     let _ = prefetch_wbstream_manifest_sidecar().await;
+    let _ = prefetch_telemost_manifest_sidecar().await;
 
     // If the server returns a full sing-box config (has dns + inbounds + route),
     // use it directly — no need to rebuild. This allows the Proteus config server
@@ -821,7 +831,7 @@ async fn parse_and_cache_config_body(body: &str, mode: InboundMode) -> Result<St
         && server_config.get("inbounds").is_some()
         && server_config.get("route").is_some();
 
-    let config = if is_full_config {
+    let mut config = if is_full_config {
         log::info!("Server returned full sing-box config");
         strip_client_side_metadata(&mut server_config);
         migrate_legacy_singbox_config(&mut server_config);
@@ -832,6 +842,7 @@ async fn parse_and_cache_config_body(body: &str, mode: InboundMode) -> Result<St
     } else {
         build_config_from_server(&server_config, mode)?
     };
+    inject_telemost_fallback(&mut config);
 
     let final_json = serde_json::to_string_pretty(&config)?;
     let path = match mode {
@@ -1049,6 +1060,7 @@ fn verify_wbstream_manifest_for_fallback_with_pem(
 fn strip_client_side_metadata(config: &mut serde_json::Value) {
     if let Some(obj) = config.as_object_mut() {
         obj.remove("wbstream_manifest");
+        obj.remove("telemost_manifest");
     }
 }
 
@@ -1229,6 +1241,270 @@ pub fn select_wbstream_room_urls(manifest: &serde_json::Value, limit: usize) -> 
         .collect()
 }
 
+const TELEMOST_LINK_PREFIX: &str = "https://telemost.yandex.ru/j/";
+
+fn is_usable_telemost_manifest(manifest: &serde_json::Value) -> bool {
+    if manifest.get("signature_alg").and_then(|v| v.as_str()) != Some("RS256") {
+        return false;
+    }
+    if manifest
+        .get("payload_b64")
+        .and_then(|v| v.as_str())
+        .is_none()
+        || manifest.get("signature").and_then(|v| v.as_str()).is_none()
+    {
+        return false;
+    }
+    manifest
+        .get("payload")
+        .and_then(|payload| payload.get("rooms"))
+        .and_then(|rooms| rooms.as_array())
+        .map(|rooms| {
+            rooms.iter().any(|room| {
+                room.get("url")
+                    .and_then(|url| url.as_str())
+                    .map(|url| url.starts_with(TELEMOST_LINK_PREFIX))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn cache_telemost_manifest_from_server(server_config: &serde_json::Value) {
+    let Some(manifest) = server_config.get("telemost_manifest") else {
+        return;
+    };
+    if !is_usable_telemost_manifest(manifest) {
+        log::warn!("Ignoring unusable Telemost manifest metadata from config server");
+        return;
+    }
+    let path = telemost_manifest_file_path();
+    match serde_json::to_string_pretty(manifest)
+        .map_err(|e| e.to_string())
+        .and_then(|body| std::fs::write(&path, body).map_err(|e| e.to_string()))
+    {
+        Ok(()) => log::info!("Telemost manifest cached to {}", path.display()),
+        Err(e) => log::warn!("Could not cache Telemost manifest: {}", e),
+    }
+}
+
+pub fn load_cached_telemost_manifest() -> Result<serde_json::Value, ConfigError> {
+    let path = telemost_manifest_file_path();
+    let body = std::fs::read_to_string(&path)?;
+    let manifest: serde_json::Value = serde_json::from_str(&body)?;
+    if !is_usable_telemost_manifest(&manifest) {
+        return Err("cached Telemost manifest is unusable".into());
+    }
+    Ok(manifest)
+}
+
+/// Full fallback gate for Telemost: shape + RS256 (same embedded trust root as
+/// the WB Stream manifest — one signing identity for Proteus whitelist
+/// carriers) + non-expired valid_until.
+pub fn verify_telemost_manifest_for_fallback(
+    manifest: &serde_json::Value,
+) -> Result<(), String> {
+    if !is_usable_telemost_manifest(manifest) {
+        return Err("Telemost manifest shape unusable".to_string());
+    }
+    verify_wbstream_manifest_signature_with_pem(manifest, WBSTREAM_MANIFEST_PUBLIC_PEM)?;
+    let valid_until = manifest
+        .get("payload")
+        .and_then(|p| p.get("valid_until"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "manifest missing valid_until".to_string())?;
+    let until = chrono::DateTime::parse_from_rfc3339(valid_until)
+        .map_err(|e| format!("valid_until parse failed: {e}"))?;
+    let now = chrono::Utc::now();
+    if until.with_timezone(&chrono::Utc) + chrono::Duration::seconds(60) < now {
+        return Err(format!("Telemost manifest expired at {valid_until}"));
+    }
+    Ok(())
+}
+
+/// True when a verified Telemost manifest is cached — i.e. the client-side
+/// joiner fallback can actually be started right now.
+pub fn telemost_fallback_available() -> bool {
+    load_cached_telemost_manifest()
+        .map(|m| verify_telemost_manifest_for_fallback(&m).is_ok())
+        .unwrap_or(false)
+}
+
+/// Stable per-install seed used to spread clients across the shared room
+/// pool. A Telemost conference carries exactly ONE active joiner — two
+/// clients in the same room reset each other's relay bridge on every peer
+/// epoch (verified live), so "everyone takes the first N links" degrades the
+/// whole pool the moment a second user falls back. The seed is generated
+/// once, persisted, and never sent anywhere.
+fn telemost_client_seed() -> u64 {
+    let path = data_dir().join("telemost-seed");
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(seed) = raw.trim().parse::<u64>() {
+            return seed;
+        }
+    }
+    let seed: u64 = rand::random();
+    let _ = std::fs::create_dir_all(data_dir());
+    let _ = std::fs::write(&path, seed.to_string());
+    seed
+}
+
+fn room_hash(seed: u64, url: &str) -> u64 {
+    // FNV-1a over seed || url — deterministic per client, no new deps.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in seed.to_le_bytes().iter().chain(url.as_bytes().iter()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+pub fn select_telemost_room_links(
+    manifest: &serde_json::Value,
+    limit: usize,
+) -> Vec<String> {
+    let rooms = manifest
+        .get("payload")
+        .and_then(|payload| payload.get("rooms"))
+        .and_then(|rooms| rooms.as_array());
+    let Some(rooms) = rooms else {
+        return Vec::new();
+    };
+
+    let seed = telemost_client_seed();
+    let mut candidates: Vec<(u64, String)> = rooms
+        .iter()
+        .filter_map(|room| {
+            let url = room.get("url").and_then(|url| url.as_str())?;
+            if !url.starts_with(TELEMOST_LINK_PREFIX) {
+                return None;
+            }
+            Some((room_hash(seed, url), url.to_string()))
+        })
+        .collect();
+    candidates.sort_by_key(|(key, _)| *key);
+    candidates
+        .into_iter()
+        .map(|(_, url)| url)
+        .take(limit)
+        .collect()
+}
+
+/// Inject the client-side Telemost joiner into the generated config: a local
+/// SOCKS outbound (`telemost-local`) pointed at the sidecar balancer port is
+/// added as a member of the server-provided `whitelist-auto` urltest, and the
+/// joiner binary's own signalling/media traffic is pinned to `direct` so TUN
+/// mode never loops it back through itself. No-op unless a verified manifest
+/// is cached — a forged manifest must never be able to install a carrier.
+/// Server-side Telemost relay leaves — they stay in `whitelist-auto` next to
+/// the client-side `telemost-local` joiner. Under a hard whitelist their relay
+/// IPs are unreachable and the joiner path wins; in degraded modes they are a
+/// useful extra member.
+const TELEMOST_RELAY_TAGS: &[&str] = &["izhevsk-telemost", "firstbyte-tm-telemost"];
+
+fn inject_telemost_fallback(config: &mut serde_json::Value) {
+    if !telemost_fallback_available() {
+        return;
+    }
+    let Some(outbounds) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) else {
+        return;
+    };
+    if !outbounds.iter().any(|o| {
+        o.get("tag").and_then(|t| t.as_str()) == Some("telemost-local")
+    }) {
+        outbounds.push(serde_json::json!({
+            "type": "socks",
+            "tag": "telemost-local",
+            "server": "127.0.0.1",
+            "server_port": TELEMOST_LOCAL_BALANCER_PORT,
+            "version": "5"
+        }));
+    }
+
+    // Collect whitelist members: telemost-local + any server-provided
+    // Telemost relay leaves present in the payload.
+    let mut wl_members: Vec<String> = vec!["telemost-local".to_string()];
+    for tag in TELEMOST_RELAY_TAGS {
+        if outbounds.iter().any(|o| {
+            o.get("tag").and_then(|t| t.as_str()) == Some(*tag)
+                && !matches!(
+                    o.get("type").and_then(|t| t.as_str()),
+                    Some("urltest") | Some("selector")
+                )
+        }) {
+            wl_members.push((*tag).to_string());
+        }
+    }
+
+    let mut group_exists = false;
+    for o in outbounds.iter_mut() {
+        if o.get("tag").and_then(|t| t.as_str()) == Some("whitelist-auto")
+            && matches!(
+                o.get("type").and_then(|t| t.as_str()),
+                Some("urltest") | Some("selector")
+            )
+        {
+            group_exists = true;
+            if let Some(list) = o.get_mut("outbounds").and_then(|m| m.as_array_mut()) {
+                for member in &wl_members {
+                    if !list.iter().any(|m| m.as_str() == Some(member.as_str())) {
+                        list.push(serde_json::json!(member));
+                    }
+                }
+            }
+        }
+    }
+    if !group_exists {
+        // Outbounds-only (Lumen subscription) payloads carry no groups — the
+        // group must be synthesized here or the fallback can never engage.
+        outbounds.push(serde_json::json!({
+            "type": "urltest",
+            "tag": "whitelist-auto",
+            "outbounds": wl_members,
+            "url": "https://www.cloudflare.com/cdn-cgi/trace",
+            "interval": "15s",
+            "tolerance": 200,
+            "idle_timeout": "30m",
+            "interrupt_exist_connections": false
+        }));
+    }
+
+    // Nest whitelist-auto into the Auto urltest (failover in both directions)
+    // and into the `proxy` selector (manual pin). Full server configs already
+    // do this inside ensure_location_selector; wrapped payloads need it here.
+    for o in outbounds.iter_mut() {
+        let tag = o.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+        let is_group = matches!(
+            o.get("type").and_then(|t| t.as_str()),
+            Some("urltest") | Some("selector")
+        );
+        if (tag == "proxy-auto" || tag == "proxy") && is_group {
+            if let Some(list) = o.get_mut("outbounds").and_then(|m| m.as_array_mut()) {
+                if !list.iter().any(|m| m.as_str() == Some("whitelist-auto")) {
+                    list.push(serde_json::json!("whitelist-auto"));
+                }
+            }
+        }
+    }
+    if let Some(rules) = config
+        .get_mut("route")
+        .and_then(|r| r.get_mut("rules"))
+        .and_then(|r| r.as_array_mut())
+    {
+        rules.insert(
+            0,
+            serde_json::json!({"process_name": ["headless-telemost-joiner"], "outbound": "direct"}),
+        );
+        rules.insert(
+            1,
+            serde_json::json!({
+                "domain_suffix": ["telemost.yandex.ru", ".strm.yandex.net", "yastatic.net"],
+                "outbound": "direct"
+            }),
+        );
+    }
+}
+
 pub fn save_wbstream_fallback_config(
     mode: InboundMode,
     local_socks_port: u16,
@@ -1327,6 +1603,73 @@ fn build_wbstream_fallback_config(mode: InboundMode, local_socks_port: u16) -> s
 
 const WBSTREAM_MANIFEST_PREFETCH_URLS: &[&str] =
     &["https://config.getlumen.download/wbstream-manifest.json"];
+
+/// Telemost manifest lives on Yandex Object Storage — reachable from RF under
+/// whitelist mode, so prefetch stays possible even when the config gateway is
+/// cut. Verified RS256 before it is ever written to cache.
+const TELEMOST_MANIFEST_PREFETCH_URLS: &[&str] = &[
+    "https://storage.yandexcloud.net/proteus-sub-hwai-9f2/telemost-manifest.json",
+];
+
+/// Best-effort Telemost manifest refresh. Unlike the WB prefetch this one is
+/// also safe to call while whitelist mode is active — the bucket is
+/// whitelisted — but the fallback path itself still uses the cache only.
+pub async fn prefetch_telemost_manifest_sidecar() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!(
+            "Lumen/",
+            env!("CARGO_PKG_VERSION"),
+            " telemost-prefetch"
+        ))
+        .timeout(std::time::Duration::from_secs(6))
+        .no_proxy()
+        .build()
+        .map_err(|e| format!("Could not build Telemost prefetch client: {}", e))?;
+
+    let mut last_error = None;
+    for url in TELEMOST_MANIFEST_PREFETCH_URLS {
+        let result = async {
+            let resp = client
+                .get(*url)
+                .send()
+                .await
+                .map_err(|e| format!("fetch: {}", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("status {}", resp.status()));
+            }
+            let manifest: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("manifest JSON: {}", e))?;
+            if !is_usable_telemost_manifest(&manifest) {
+                return Err("unusable manifest shape".to_string());
+            }
+            verify_wbstream_manifest_signature_with_pem(
+                &manifest,
+                WBSTREAM_MANIFEST_PUBLIC_PEM,
+            )
+            .map_err(|e| format!("manifest signature rejected: {}", e))?;
+            let path = telemost_manifest_file_path();
+            let body = serde_json::to_string_pretty(&manifest)
+                .map_err(|e| e.to_string())?;
+            std::fs::write(&path, body).map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                log::info!("Telemost manifest prefetched from {}", url);
+                return Ok(());
+            }
+            Err(e) => {
+                log::warn!("Telemost manifest prefetch from {} failed: {}", url, e);
+                last_error = Some(e);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "no Telemost manifest URLs".to_string()))
+}
 
 /// Build a single-outbound sing-box config from a parsed VLESS link.
 /// Used when user supplies a raw vless:// URI instead of a Proteus subscription.

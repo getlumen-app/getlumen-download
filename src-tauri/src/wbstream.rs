@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 /// Build a `Command` that never flashes a console window on Windows
 /// (CREATE_NO_WINDOW). Mirrors `singbox::silent_command`; WB Stream sidecars
 /// are otherwise short-lived child processes that would pop a console window.
-fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+pub(crate) fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {

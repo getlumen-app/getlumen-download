@@ -32,6 +32,8 @@ interface Props {
   onSelectLocation?: (tag: string) => void;
   errorMsg?: string;
   restartHint?: boolean;
+  /** Backend health monitor switched this session to the Telemost fallback. */
+  fallbackActive?: boolean;
 }
 
 function formatTime(seconds: number): string {
@@ -69,6 +71,7 @@ export default function Home({
   onSelectLocation,
   errorMsg,
   restartHint,
+  fallbackActive,
 }: Props) {
   const [sheetOpen, setSheetOpen] = useState(false);
   const locations: LocationOption[] = availableLocations(locationNodes);
@@ -126,6 +129,10 @@ export default function Home({
       )}
 
       {errorMsg && <div className="home__error">{errorMsg}</div>}
+
+      {fallbackActive && connectionState === "connected" && (
+        <div className="home__fallback">Whitelist fallback · via Telemost</div>
+      )}
 
       {restartHint && connectionState === "disconnected" && (
         <div className="home__restart-hint">

@@ -103,7 +103,7 @@ export async function healthMonitorDecision(
   transport: "tun" | "proxy",
   previousFailures: number,
   probeOk: boolean
-): Promise<{ consecutive_failures: number; action: "stay" }> {
+): Promise<{ consecutive_failures: number; action: "stay" | "activate_fallback" }> {
   if (!IS_TAURI) {
     const consecutive_failures = probeOk ? 0 : previousFailures + 1;
     return {
@@ -116,6 +116,11 @@ export async function healthMonitorDecision(
     previousFailures,
     probeOk,
   });
+}
+
+export async function startTelemostFallback(): Promise<number> {
+  if (!IS_TAURI) throw new Error("telemost fallback requires tauri runtime");
+  return invoke<number>("start_telemost_fallback");
 }
 
 export async function getProxies(): Promise<Record<string, unknown> | null> {

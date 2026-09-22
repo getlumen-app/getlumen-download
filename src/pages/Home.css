@@ -104,6 +104,17 @@
   word-break: break-word;
 }
 
+.home__fallback {
+  max-width: 300px;
+  padding: 5px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  text-align: center;
+}
+
 .home__restart-hint {
   max-width: 300px;
   padding: 7px 12px;

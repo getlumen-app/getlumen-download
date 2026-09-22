@@ -249,6 +249,7 @@ pub async fn tun_connect(
     {
         Response::Started { pid } => {
             announce_dropped_exit_pin(&app);
+            crate::health_monitor::start(&app, &state.health_task);
             Ok(pid)
         }
         Response::Error { message } => Err(message),
@@ -275,9 +276,20 @@ fn announce_dropped_exit_pin(app: &tauri::AppHandle) {
     }
 }
 
-/// Disconnect TUN: stop sing-box via helper.
+/// Disconnect TUN: stop the health monitor, the Telemost sidecars, and the
+/// helper sing-box.
 #[tauri::command]
-pub async fn tun_disconnect() -> Result<(), String> {
+pub async fn tun_disconnect(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
+    crate::health_monitor::stop(&state.health_task);
+    stop_tun_runtime().await
+}
+
+/// Everything that tears the TUN session down except the monitor (which the
+/// callers stop first, since they own `AppState`). Shared by `tun_disconnect`
+/// and `shutdown_network_runtime`, which runs where no command State exists.
+pub(crate) async fn stop_tun_runtime() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    crate::telemost::stop_sidecars();
     match tun_runtime::send(Request::Stop).await? {
         Response::Stopped => Ok(()),
         Response::Error { message } => Err(message),
@@ -287,7 +299,8 @@ pub async fn tun_disconnect() -> Result<(), String> {
 
 /// Stop sing-box.
 #[tauri::command]
-pub async fn tun_stop() -> Result<(), String> {
+pub async fn tun_stop(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
+    crate::health_monitor::stop(&state.health_task);
     match tun_runtime::send(Request::Stop).await? {
         Response::Stopped => Ok(()),
         Response::Error { message } => Err(message),

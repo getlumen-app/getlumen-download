@@ -60,9 +60,8 @@ export default function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [activeTransport, setActiveTransport] = useState<ActiveTransport>(null);
   const [restartHint, setRestartHint] = useState(false);
+  const [fallbackActive, setFallbackActive] = useState(false);
   const trafficInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-  const healthFailures = useRef(0);
-  const fallbackSwitching = useRef(false);
   const launchSelfHealChecked = useRef(false);
   const locationAppliedRef = useRef(false);
   const connectInFlight = useRef(false);
@@ -302,35 +301,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [connectionState, fetchProxyData]);
 
-  useEffect(() => {
-    if (connectionState !== "connected" || activeTransport !== "tun") {
-      healthFailures.current = 0;
-      return;
-    }
-
-    let cancelled = false;
-    async function checkHealth() {
-      if (cancelled || fallbackSwitching.current || activeTransport !== "tun") return;
-      const probeOk = await tauri.internetHealthProbe();
-      const decision = await tauri.healthMonitorDecision(
-        "tun",
-        healthFailures.current,
-        probeOk
-      );
-      healthFailures.current = decision.consecutive_failures;
-      // WB Stream fallback removed — no alternative carrier available.
-      // Health monitor only tracks failures; no automatic transport switch.
-    }
-
-    const warmup = setTimeout(checkHealth, 5000);
-    const interval = setInterval(checkHealth, 10000);
-    return () => {
-      cancelled = true;
-      clearTimeout(warmup);
-      clearInterval(interval);
-    };
-  }, [connectionState, activeTransport]);
-
   async function tearDownSession() {
     const tunStatus = await tauri.tunStatus();
     const plan = planSessionTeardown(activeTransport, tunStatus);
@@ -356,7 +326,7 @@ export default function App() {
     setProxyGroups([]);
     setCurrentServer(readStoredLocation());
     locationAppliedRef.current = false;
-    healthFailures.current = 0;
+    setFallbackActive(false);
   }
 
   async function connectWithPreferredMode(useTun: boolean) {
@@ -364,6 +334,7 @@ export default function App() {
     setConnectionState("connecting");
     setErrorMsg("");
     setRestartHint(false);
+    setFallbackActive(false);
     locationAppliedRef.current = false;
     // Native connect starts the transport before the command resolves; mark
     // intent first so status sync never tears down that in-flight session.
@@ -373,7 +344,6 @@ export default function App() {
       if (useTun) {
         await tauri.tunConnect(accessKey);
         setActiveTransport("tun");
-        healthFailures.current = 0;
       } else {
         await tauri.connect(accessKey);
         setActiveTransport("proxy");
@@ -390,7 +360,6 @@ export default function App() {
             console.warn("System Proxy route unhealthy; falling back to TUN");
             await tauri.tunConnect(accessKey);
             setActiveTransport("tun");
-            healthFailures.current = 0;
             setConnectionState("connected");
             setCurrentServer(readStoredLocation());
             return;
@@ -478,6 +447,19 @@ export default function App() {
       setErrorMsg(
         "The selected location was not passing traffic — switched back to Auto."
       );
+    });
+    return () => {
+      void pending.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  // Backend health monitor activated the Telemost fallback — show it on Home.
+  // The event fires once per TUN session after the sidecars come up.
+  useEffect(() => {
+    if (!tauri.IS_TAURI) return;
+    const pending = listen<number>("lumen://telemost-fallback-active", (event) => {
+      setFallbackActive(true);
+      console.warn(`Telemost fallback active: local SOCKS on ${event.payload}`);
     });
     return () => {
       void pending.then((unlisten) => unlisten());
@@ -596,6 +578,7 @@ export default function App() {
             onSelectLocation={handleSelectLocation}
             errorMsg={errorMsg}
             restartHint={restartHint}
+            fallbackActive={fallbackActive}
           />
         )}
         {tab === "proxies" && (
