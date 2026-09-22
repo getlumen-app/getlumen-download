@@ -318,8 +318,19 @@ export default function App() {
         probeOk
       );
       healthFailures.current = decision.consecutive_failures;
-      // WB Stream fallback removed — no alternative carrier available.
-      // Health monitor only tracks failures; no automatic transport switch.
+      if (decision.action === "activate_fallback") {
+        fallbackSwitching.current = true;
+        try {
+          const port = await tauri.startTelemostFallback();
+          console.warn(`Telemost fallback active: local SOCKS on ${port}`);
+        } catch (e) {
+          console.error("Telemost fallback start failed:", e);
+        } finally {
+          // Allow a retry on the next probe cycle if the start failed; when it
+          // succeeded the call is idempotent and the urltest owns routing.
+          fallbackSwitching.current = false;
+        }
+      }
     }
 
     const warmup = setTimeout(checkHealth, 5000);

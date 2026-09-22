@@ -278,6 +278,8 @@ fn announce_dropped_exit_pin(app: &tauri::AppHandle) {
 /// Disconnect TUN: stop sing-box via helper.
 #[tauri::command]
 pub async fn tun_disconnect() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    crate::telemost::stop_sidecars();
     match tun_runtime::send(Request::Stop).await? {
         Response::Stopped => Ok(()),
         Response::Error { message } => Err(message),

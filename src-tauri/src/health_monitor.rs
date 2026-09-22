@@ -25,11 +25,15 @@ pub enum ProbeOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MonitorAction {
     Stay,
+    ActivateFallback,
 }
 
 impl MonitorAction {
     pub fn as_str(self) -> &'static str {
-        "stay"
+        match self {
+            MonitorAction::Stay => "stay",
+            MonitorAction::ActivateFallback => "activate_fallback",
+        }
     }
 }
 
@@ -59,13 +63,22 @@ pub fn next_failure_count(previous: u8, outcome: ProbeOutcome) -> u8 {
     }
 }
 
-/// WB Stream fallback removed (2026-09-10): no alternative carrier available.
-/// Health monitor only tracks failures; no automatic transport switch.
+/// Telemost fallback (2026-09-22): when a verified Telemost manifest is cached
+/// and the TUN transport keeps failing, ask the frontend to start the local
+/// joiner sidecars. The `whitelist-auto` urltest then picks up `telemost-local`
+/// and hands the route back to a foreign exit once one probes healthy again.
 pub fn decide_action(
-    _transport: TransportKind,
-    _consecutive_failures: u8,
-    _policy: HealthPolicy,
+    transport: TransportKind,
+    consecutive_failures: u8,
+    policy: HealthPolicy,
+    fallback_available: bool,
 ) -> MonitorAction {
+    if transport == TransportKind::Tun
+        && fallback_available
+        && consecutive_failures >= policy.consecutive_failures_to_switch
+    {
+        return MonitorAction::ActivateFallback;
+    }
     MonitorAction::Stay
 }
 
@@ -84,9 +97,17 @@ mod tests {
     }
 
     #[test]
-    fn tun_does_not_switch_after_threshold() {
+    fn tun_switches_after_threshold_when_fallback_available() {
         assert_eq!(
-            decide_action(TransportKind::Tun, 2, HealthPolicy::default()),
+            decide_action(TransportKind::Tun, 2, HealthPolicy::default(), true),
+            MonitorAction::ActivateFallback
+        );
+    }
+
+    #[test]
+    fn tun_stays_after_threshold_when_no_fallback() {
+        assert_eq!(
+            decide_action(TransportKind::Tun, 2, HealthPolicy::default(), false),
             MonitorAction::Stay
         );
     }
@@ -94,7 +115,7 @@ mod tests {
     #[test]
     fn tun_does_not_switch_on_single_failure() {
         assert_eq!(
-            decide_action(TransportKind::Tun, 1, HealthPolicy::default()),
+            decide_action(TransportKind::Tun, 1, HealthPolicy::default(), true),
             MonitorAction::Stay
         );
     }
@@ -102,7 +123,7 @@ mod tests {
     #[test]
     fn proxy_mode_does_not_switch() {
         assert_eq!(
-            decide_action(TransportKind::Proxy, 3, HealthPolicy::default()),
+            decide_action(TransportKind::Proxy, 3, HealthPolicy::default(), true),
             MonitorAction::Stay
         );
     }

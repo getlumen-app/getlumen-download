@@ -20,6 +20,8 @@ pub mod wbstream_accounts;
 #[cfg(target_os = "macos")]
 mod wbstream_balancer;
 pub mod wbstream_multipath;
+#[cfg(target_os = "macos")]
+mod telemost;
 
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -603,6 +605,8 @@ async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectOutcome, Str
     let proxy_env_cleared = has_lumen_proxy_env();
 
     clear_lumen_proxy_env();
+    #[cfg(target_os = "macos")]
+    telemost::stop_sidecars();
 
     let singbox = state
         .singbox
@@ -661,11 +665,45 @@ fn health_monitor_decision(
         transport,
         consecutive_failures,
         health_monitor::HealthPolicy::default(),
+        telemost_fallback_available_flag(),
     );
     Ok(health_monitor::HealthDecision {
         consecutive_failures,
         action: action.as_str(),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn telemost_fallback_available_flag() -> bool {
+    config::telemost_fallback_available()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn telemost_fallback_available_flag() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn telemost_fallback_status(app: tauri::AppHandle) -> Result<telemost::TelemostFallbackStatus, String> {
+    Ok(telemost::fallback_status(&app))
+}
+
+/// Start the local Telemost joiner sidecars from the cached, verified manifest.
+/// Idempotent: a healthy running set returns the balancer port without a
+/// respawn. The `telemost-local` outbound was already injected into
+/// `whitelist-auto` at config build time — once sidecars are up, the urltest
+/// takes over routing in both directions.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn start_telemost_fallback(app: tauri::AppHandle) -> Result<u16, String> {
+    telemost::start_sidecars_from_cached_manifest(&app).await
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn stop_telemost_fallback() {
+    telemost::stop_sidecars();
 }
 
 #[tauri::command]
@@ -1012,6 +1050,12 @@ pub fn run() {
             disconnect,
             internet_health_probe,
             health_monitor_decision,
+            #[cfg(target_os = "macos")]
+            telemost_fallback_status,
+            #[cfg(target_os = "macos")]
+            start_telemost_fallback,
+            #[cfg(target_os = "macos")]
+            stop_telemost_fallback,
             get_status,
             get_effective_status,
             network_diagnostics,
