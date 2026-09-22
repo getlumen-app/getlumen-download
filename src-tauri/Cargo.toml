@@ -22,7 +22,7 @@ log = "0.4"
 tauri = { version = "2.10.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-tokio = { version = "1", features = ["process", "fs", "time", "sync", "net", "io-util"] }
+tokio = { version = "1", features = ["process", "fs", "time", "sync", "net", "io-util", "rt", "macros"] }
 dirs = "6"
 url = "2"
 urlencoding = "2"
