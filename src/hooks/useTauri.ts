@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ConfigRefreshResult } from "../lib/configRefresh";
 
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
 
@@ -8,6 +9,19 @@ export async function fetchConfig(key: string): Promise<string> {
     return JSON.stringify({ mock: true });
   }
   return invoke<string>("fetch_config", { key });
+}
+
+export async function refreshConfig(key: string, mode: "tun" | "proxy"): Promise<ConfigRefreshResult> {
+  if (!IS_TAURI) {
+    await new Promise((r) => setTimeout(r, 500));
+    return { kind: "downloaded", updated_at_ms: Date.now() };
+  }
+  return invoke<ConfigRefreshResult>("refresh_config", { key, mode });
+}
+
+export async function configUpdatedAt(mode: "tun" | "proxy"): Promise<number | null> {
+  if (!IS_TAURI) return null;
+  return invoke<number | null>("config_updated_at", { mode });
 }
 
 export async function connect(key: string): Promise<void> {

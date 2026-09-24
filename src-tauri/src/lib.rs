@@ -22,6 +22,7 @@ mod wbstream_balancer;
 pub mod wbstream_multipath;
 #[cfg(target_os = "macos")]
 mod telemost;
+pub mod config_refresh;
 
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -485,6 +486,72 @@ async fn fetch_config(key: String, state: State<'_, AppState>) -> Result<String,
     let path = config::config_file_path();
     *state.config_path.lock().unwrap() = Some(path.to_string_lossy().to_string());
     Ok(std::fs::read_to_string(&path).unwrap_or_default())
+}
+
+#[derive(serde::Serialize)]
+struct ConfigRefreshResult {
+    /// "downloaded" — a fresh server config replaced the one on disk;
+    /// "static" — the profile is a single link, there is nothing to download.
+    kind: &'static str,
+    /// When the config for this mode was last written (epoch ms), if ever.
+    updated_at_ms: Option<u64>,
+}
+
+fn mode_config_path(tun: bool) -> std::path::PathBuf {
+    if tun {
+        config::tun_config_file_path()
+    } else {
+        config::config_file_path()
+    }
+}
+
+/// Settings → Refresh Config. Downloads the active profile's config for the
+/// current VPN mode and reports failure honestly — unlike connect, it never
+/// falls back to the cached copy, because "refreshed" must mean fresh bytes.
+#[tauri::command]
+async fn refresh_config(key: String, mode: String) -> Result<ConfigRefreshResult, String> {
+    let tun = mode == "tun";
+    let path = mode_config_path(tun);
+    let urls = match config_refresh::refresh_source(&key)? {
+        config_refresh::RefreshSource::Static => {
+            return Ok(ConfigRefreshResult {
+                kind: "static",
+                updated_at_ms: config_refresh::modified_ms(&path),
+            })
+        }
+        config_refresh::RefreshSource::Urls(urls) => urls,
+    };
+    let inbound = if tun {
+        config::InboundMode::Tun
+    } else {
+        config::InboundMode::Mixed
+    };
+    if let Err(direct_err) = config::fetch_and_cache_first_available_with_mode(&urls, inbound).await {
+        // A censored control plane can still be reached through a running
+        // local proxy session; without one this fails fast and we report the
+        // direct error, which is the one the user can act on.
+        config::fetch_and_cache_first_available_with_mode_via_proxy(
+            &urls,
+            inbound,
+            &format!("http://127.0.0.1:{}", singbox::LOCAL_PROXY_PORT),
+        )
+        .await
+        .map_err(|_| format!("Config download failed: {}", direct_err))?;
+    }
+    if tun {
+        if let Ok(good) = std::fs::read_to_string(&path) {
+            let _ = std::fs::write(config::tun_config_lastgood_path(), good);
+        }
+    }
+    Ok(ConfigRefreshResult {
+        kind: "downloaded",
+        updated_at_ms: config_refresh::modified_ms(&path),
+    })
+}
+
+#[tauri::command]
+fn config_updated_at(mode: String) -> Option<u64> {
+    config_refresh::modified_ms(&mode_config_path(mode == "tun"))
 }
 
 #[tauri::command]
@@ -1066,6 +1133,8 @@ pub fn run() {
             detect_key,
             import_bootstrap_payload,
             fetch_config,
+            refresh_config,
+            config_updated_at,
             connect,
             disconnect,
             internet_health_probe,

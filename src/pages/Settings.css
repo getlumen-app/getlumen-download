@@ -487,3 +487,25 @@
   color: var(--status-down);
   border: 1px solid var(--status-down);
 }
+
+/* Refresh Config — busy spinner + success colour */
+.settings__spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 8px;
+  vertical-align: -2px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: settings-spin 0.7s linear infinite;
+}
+@keyframes settings-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings__spinner { animation-duration: 2s; }
+}
+.settings__status--ok {
+  color: var(--accent);
+}

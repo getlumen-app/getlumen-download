@@ -405,6 +405,14 @@ export default function App() {
     await switchToPreferredMode(useTun);
   }
 
+  /** Settings → Refresh Config wrote a fresh config; a live session keeps
+   *  running the old one until sing-box restarts, so re-apply it here. */
+  async function handleConfigRefreshed(): Promise<boolean> {
+    if (connectionState !== "connected") return false;
+    await switchToPreferredMode(activeTransport === "tun");
+    return true;
+  }
+
   async function handleDisconnect() {
     if (connectInFlight.current) return;
     connectInFlight.current = true;
@@ -599,6 +607,7 @@ export default function App() {
             }}
             onViewLogs={() => setShowLogs(true)}
             onVpnModeChange={handleVpnModeChange}
+            onConfigRefreshed={handleConfigRefreshed}
           />
         )}
       </div>

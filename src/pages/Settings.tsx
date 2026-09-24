@@ -10,6 +10,11 @@ import {
   formatDiagnosticsSnapshot,
   repairNetworkMessage,
 } from "../lib/connectionState";
+import {
+  formatConfigUpdated,
+  refreshErrorMessage,
+  refreshStatusMessage,
+} from "../lib/configRefresh";
 import "./Settings.css";
 
 interface TunStatus {
@@ -30,6 +35,9 @@ interface Props {
   onViewLogs?: () => void;
   /** When connected, switching TUN↔Proxy should hot-swap the live session. */
   onVpnModeChange?: (mode: "tun" | "proxy") => void;
+  /** After a config refresh: re-apply it to a live session. Resolves true
+   *  when the VPN was reconnected, false when there was nothing to re-apply. */
+  onConfigRefreshed?: () => Promise<boolean>;
 }
 
 type ThemeOption = "system" | "light" | "dark";
@@ -40,6 +48,7 @@ export default function Settings({
   onClearKey,
   onViewLogs,
   onVpnModeChange,
+  onConfigRefreshed,
 }: Props) {
   const [theme, setTheme] = useState<ThemeOption>(() => {
     return (localStorage.getItem("lumen-theme") as ThemeOption) || "dark";
@@ -54,6 +63,9 @@ export default function Settings({
   const [tunBusy, setTunBusy] = useState(false);
   const [tunError, setTunError] = useState<string | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState<{ text: string; ok: boolean } | null>(null);
+  const [configUpdatedMs, setConfigUpdatedMs] = useState<number | null>(null);
   const [repairStatus, setRepairStatus] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<tauri.NetworkDiagnostics | null>(null);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
@@ -114,6 +126,39 @@ export default function Settings({
       setTunError(String(e));
     } finally {
       setTunBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    let alive = true;
+    tauri
+      .configUpdatedAt(vpnMode)
+      .then((ms) => alive && setConfigUpdatedMs(ms))
+      .catch((e) => console.warn("config_updated_at:", e));
+    return () => {
+      alive = false;
+    };
+  }, [vpnMode]);
+
+  async function handleRefreshConfig() {
+    if (refreshBusy) return;
+    if (!accessKey) {
+      setRefreshStatus({ text: "Add a profile first — there is nothing to refresh", ok: false });
+      return;
+    }
+    setRefreshBusy(true);
+    setRefreshStatus(null);
+    try {
+      const result = await tauri.refreshConfig(accessKey, vpnMode);
+      setConfigUpdatedMs(result.updated_at_ms);
+      const reconnected =
+        result.kind === "downloaded" && onConfigRefreshed ? await onConfigRefreshed() : false;
+      setRefreshStatus({ text: refreshStatusMessage(result, { reconnected }), ok: true });
+    } catch (e) {
+      console.error("Refresh config failed:", e);
+      setRefreshStatus({ text: refreshErrorMessage(e), ok: false });
+    } finally {
+      setRefreshBusy(false);
     }
   }
 
@@ -359,11 +404,33 @@ export default function Settings({
         {/* Advanced */}
         <section className="settings__section">
           <h3 className="settings__section-title">Advanced</h3>
-          <p className="settings__info">Config updated: just now</p>
+          <p className="settings__info">Config updated: {formatConfigUpdated(configUpdatedMs)}</p>
           <div className="settings__actions">
-            <button className="settings__action-btn">Refresh Config</button>
+            <button
+              className="settings__action-btn"
+              onClick={handleRefreshConfig}
+              disabled={refreshBusy}
+              aria-busy={refreshBusy}
+            >
+              {refreshBusy ? (
+                <>
+                  <span className="settings__spinner" aria-hidden="true" />
+                  Refreshing…
+                </>
+              ) : (
+                "Refresh Config"
+              )}
+            </button>
             <button className="settings__action-btn" onClick={onViewLogs}>View Logs</button>
           </div>
+          {refreshStatus && (
+            <p
+              className={`settings__repair-status ${refreshStatus.ok ? "settings__status--ok" : ""}`}
+              role="status"
+            >
+              {refreshStatus.text}
+            </p>
+          )}
         </section>
 
         <section className="settings__section">
@@ -440,7 +507,7 @@ export default function Settings({
 
         {/* About */}
         <section className="settings__section settings__section--footer">
-          <p className="settings__version">Lumen v2.6.7</p>
+          <p className="settings__version">Lumen v2.6.8</p>
           <button className="settings__action-btn">Check for Updates</button>
           <button className="settings__logout-btn" onClick={onClearKey}>
             Sign Out
