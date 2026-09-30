@@ -17,6 +17,12 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            // Sideloaded via Telegram (50MB Bot API upload cap) — ship arm64
+            // only; every supported modern device uses it.
+            abiFilters += setOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -45,8 +51,10 @@ android {
     }
 
     packagingOptions {
-        // extractNativeLibs=true requires the libs uncompressed+aligned.
-        jniLibs.useLegacyPackaging = true
+        // extractNativeLibs=true only governs install-time extraction; keeping
+        // compression on shrinks the APK below the Telegram upload limit while
+        // libs still land in nativeLibraryDir for exec().
+        jniLibs.useLegacyPackaging = false
     }
 
     compileOptions {
