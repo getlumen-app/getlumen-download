@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Lumen</string>
+    <string name="app_tagline">Защищённое подключение с обходом белых списков</string>
+    <string name="key_hint">Proteus-ключ</string>
+    <string name="key_required">Вставьте ключ из сообщения</string>
+    <string name="action_connect">Подключить</string>
+    <string name="action_disconnect">Отключить</string>
+    <string name="status_idle">Не подключено</string>
+    <string name="status_connecting">Подключение…</string>
+    <string name="status_connected">Подключено</string>
+    <string name="status_degraded">Резервный канал (Telemost)</string>
+    <string name="status_error">Ошибка подключения</string>
+    <string name="status_disconnected">Отключено</string>
+    <string name="notification_disconnect">Отключить</string>
+    <string name="log_label">Журнал</string>
+</resources>
