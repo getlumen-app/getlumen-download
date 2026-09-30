@@ -91,12 +91,30 @@ pub fn decide_action(
 /// a menubar app spends most of its life with the window hidden, so the
 /// fallback never fired in real use. The loop now runs on the Rust side for
 /// the whole TUN session regardless of window visibility.
-pub const PROBE_WARMUP: Duration = Duration::from_secs(5);
+/// Startup grace: sing-box init + Reality dial + the first urltest cycle
+/// (interval 15s) easily outlast a 5s warmup, and probes that run while the
+/// tunnel is still coming up count as spurious failures. 20s covers the
+/// first probe round on slow networks without delaying real failover much.
+pub const PROBE_WARMUP: Duration = Duration::from_secs(20);
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Emitted once per TUN session when the fallback sidecars come up, so the
 /// shell can surface it later without polling.
 pub const FALLBACK_ACTIVE_EVENT: &str = "lumen://telemost-fallback-active";
+
+/// Emitted when a probe turns healthy again after the fallback was shown —
+/// the badge tracks the CURRENT degradation, not a once-fired latch: urltest
+/// hands the route back to a foreign exit on its own, so a lingering badge
+/// would keep reporting a problem that already resolved.
+pub const FALLBACK_RECOVERED_EVENT: &str = "lumen://telemost-fallback-recovered";
+
+/// Whether the fallback badge should be visible right now. It means "tunnel
+/// is currently degraded and the Telemost fallback is covering", so it clears
+/// on the first healthy probe and re-shows if probes degrade again within
+/// the same session (sidecars stay up, so re-show is cheap).
+pub fn should_show_badge(fallback_armed: bool, consecutive_failures: u8, policy: HealthPolicy) -> bool {
+    fallback_armed && consecutive_failures >= policy.consecutive_failures_to_switch
+}
 
 /// Slot on `AppState` holding the running monitor task; `None` = not running.
 pub type MonitorSlot = Mutex<Option<JoinHandle<()>>>;
@@ -128,8 +146,11 @@ where
 
 async fn monitor_loop(app: tauri::AppHandle) {
     tokio::time::sleep(PROBE_WARMUP).await;
+    let policy = HealthPolicy::default();
     let mut consecutive_failures: u8 = 0;
     let mut fallback_started = false;
+    let mut fallback_port: Option<u16> = None;
+    let mut badge_visible = false;
     loop {
         let outcome = match crate::probe_internet().await {
             Ok(true) => ProbeOutcome::Healthy,
@@ -139,7 +160,7 @@ async fn monitor_loop(app: tauri::AppHandle) {
         let action = decide_action(
             TransportKind::Tun,
             consecutive_failures,
-            HealthPolicy::default(),
+            policy,
             crate::telemost_fallback_available_flag(),
         );
         if action == MonitorAction::ActivateFallback && !fallback_started {
@@ -150,12 +171,23 @@ async fn monitor_loop(app: tauri::AppHandle) {
             match activate_fallback(&app).await {
                 Ok(port) => {
                     fallback_started = true;
+                    fallback_port = Some(port);
                     log::warn!("Telemost fallback active: local SOCKS on {}", port);
-                    if let Err(e) = app.emit(FALLBACK_ACTIVE_EVENT, port) {
-                        log::warn!("fallback event emit failed: {}", e);
-                    }
                 }
                 Err(e) => log::warn!("Telemost fallback start failed: {}", e),
+            }
+        }
+        let show = should_show_badge(fallback_started, consecutive_failures, policy);
+        if show != badge_visible {
+            let emitted = if show {
+                app.emit(FALLBACK_ACTIVE_EVENT, fallback_port.unwrap_or(0))
+            } else {
+                app.emit(FALLBACK_RECOVERED_EVENT, ())
+            };
+            if let Err(e) = emitted {
+                log::warn!("fallback event emit failed: {}", e);
+            } else {
+                badge_visible = show;
             }
         }
         tokio::time::sleep(PROBE_INTERVAL).await;
@@ -208,6 +240,26 @@ mod tests {
             decide_action(TransportKind::Tun, 1, HealthPolicy::default(), true),
             MonitorAction::Stay
         );
+    }
+
+    /// Badge visibility must follow CURRENT degradation, not a once-fired
+    /// latch: armed fallback + probes healthy again => hide; probes degrade
+    /// again in the same session => show again.
+    #[test]
+    fn badge_follows_degradation_state() {
+        let p = HealthPolicy::default();
+        assert!(!should_show_badge(false, 10, p), "not armed => hidden");
+        assert!(should_show_badge(true, p.consecutive_failures_to_switch, p));
+        assert!(!should_show_badge(true, 0, p), "recovered => hidden");
+        assert!(should_show_badge(true, p.consecutive_failures_to_switch, p), "re-degrade => shown again");
+    }
+
+    /// Warmup must outlast one urltest cycle: sing-box start + Reality dial +
+    /// the first member probe take longer than 5s, so the old warmup raced
+    /// the monitor into a spurious fallback on every connect.
+    #[test]
+    fn warmup_covers_first_urltest_cycle() {
+        assert!(PROBE_WARMUP >= Duration::from_secs(15));
     }
 
     #[test]

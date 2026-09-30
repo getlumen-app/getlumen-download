@@ -461,18 +461,29 @@ export default function App() {
     };
   }, []);
 
-  // Backend health monitor activated the Telemost fallback — show it on Home.
-  // The event fires once per TUN session after the sidecars come up.
+  // Backend health monitor toggles the Telemost fallback badge — it fires
+  // "active" while the tunnel is degraded and "recovered" once probes are
+  // healthy again (urltest hands the route back to a foreign exit itself).
   useEffect(() => {
     if (!tauri.IS_TAURI) return;
-    const pending = listen<number>("lumen://telemost-fallback-active", (event) => {
+    const on = listen<number>("lumen://telemost-fallback-active", (event) => {
       setFallbackActive(true);
       console.warn(`Telemost fallback active: local SOCKS on ${event.payload}`);
     });
+    const off = listen("lumen://telemost-fallback-recovered", () => {
+      setFallbackActive(false);
+    });
     return () => {
-      void pending.then((unlisten) => unlisten());
+      void on.then((unlisten) => unlisten());
+      void off.then((unlisten) => unlisten());
     };
   }, []);
+
+  // A new session starts clean: the monitor task restarts on connect, so any
+  // badge latched by the previous session must not leak into the next one.
+  useEffect(() => {
+    if (connectionState === "disconnected") setFallbackActive(false);
+  }, [connectionState]);
 
   async function handleConnect() {
     if (connectInFlight.current || connectionState === "connecting") return;

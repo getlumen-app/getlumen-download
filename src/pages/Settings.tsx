@@ -535,6 +535,7 @@ function ProfilesSection({ keyStore }: ProfilesSectionProps) {
 
   function badgeFor(type: string): string {
     if (type === "vless") return "VLESS";
+    if (type === "hy2") return "HY2";
     if (type === "subscription_url") return "URL";
     return "Proteus";
   }
