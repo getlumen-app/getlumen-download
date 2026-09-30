@@ -131,6 +131,31 @@ pub(crate) fn extract_proteus_key(url: &str) -> Option<String> {
     None
 }
 
+/// Extract the `?mode=` / `&mode=` routing-mode hint from a subscription URL.
+///
+/// Lets a stored profile value like
+/// `https://config.getlumen.download/proteus-sub?sub=KEY&mode=russia`
+/// carry the server-side profile mode (e.g. a Russia-only egress set) even
+/// though the bare key is what gets fetched. Returns `None` for values that
+/// are missing or contain characters outside `[a-z0-9-]`, so a malformed or
+/// hostile mode can never widen the request.
+pub(crate) fn extract_proteus_mode(url: &str) -> Option<String> {
+    let pos = url.find("?mode=").or_else(|| url.find("&mode="))?;
+    let mode: String = url[pos + 6..]
+        .chars()
+        .take_while(|c| *c != '&' && *c != '#')
+        .collect();
+    if (2..=24).contains(&mode.len())
+        && mode
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        Some(mode)
+    } else {
+        None
+    }
+}
+
 /// Build config (proxy mode) from any input type — VLESS link or Proteus sub key/URL.
 ///
 /// Returns full-config URLs that should be retried after a bootstrap/cached
@@ -146,6 +171,9 @@ async fn prepare_proxy_config(key: &str) -> Result<Vec<String>, String> {
         std::borrow::Cow::Borrowed(raw)
     };
     let key: &str = &key;
+    // A pasted subscription URL may pin a server-side profile (?mode=russia);
+    // the bare key extraction above would silently drop it.
+    let mode = extract_proteus_mode(raw);
     match detect_input_type(key) {
         "vless" => {
             let v = vless::parse_vless(key).map_err(|e| format!("VLESS parse failed: {}", e))?;
@@ -188,7 +216,7 @@ async fn prepare_proxy_config(key: &str) -> Result<Vec<String>, String> {
             Ok(Vec::new())
         }
         _ => {
-            let urls = config::proteus_config_urls(key);
+            let urls = config::proteus_config_urls(key, mode.as_deref());
             if let Err(fetch_err) =
                 config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Mixed)
                     .await
@@ -476,6 +504,7 @@ fn detect_key(input: String) -> serde_json::Value {
         _ => serde_json::json!({
             "type": "proteus_key",
             "valid": input.trim().len() >= 4,
+            "mode": extract_proteus_mode(&input),
         }),
     }
 }
@@ -1180,4 +1209,49 @@ pub fn run() {
                 shutdown_network_runtime(app_handle);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_proteus_mode_reads_query_param() {
+        assert_eq!(
+            extract_proteus_mode(
+                "https://config.getlumen.download/proteus-sub?sub=SomeKey123&mode=russia"
+            ),
+            Some("russia".to_string())
+        );
+        assert_eq!(
+            extract_proteus_mode(
+                "https://config.getlumen.download/proteus-sub?mode=msk&sub=SomeKey123"
+            ),
+            Some("msk".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_proteus_mode_absent_or_invalid() {
+        assert_eq!(
+            extract_proteus_mode(
+                "https://config.getlumen.download/proteus-sub?sub=SomeKey123"
+            ),
+            None
+        );
+        assert_eq!(extract_proteus_mode("SomeKey123"), None);
+        // Query-injection attempts / overlong values are not valid modes.
+        assert_eq!(
+            extract_proteus_mode(
+                "https://config.getlumen.download/proteus-sub?sub=K&mode=russia&extra=1"
+            ),
+            Some("russia".to_string())
+        );
+        assert_eq!(
+            extract_proteus_mode(
+                "https://config.getlumen.download/proteus-sub?sub=K&mode=RUSSIA!"
+            ),
+            None
+        );
+    }
 }

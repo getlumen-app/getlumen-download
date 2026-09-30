@@ -181,6 +181,9 @@ pub async fn tun_connect(
         std::borrow::Cow::Borrowed(raw)
     };
     let s: &str = &s;
+    // The key extraction above drops `?mode=` — recover the server-side
+    // profile pin (e.g. mode=russia) before building the fetch URLs.
+    let mode = crate::extract_proteus_mode(raw);
     if s.starts_with("vless://") {
         let v = crate::vless::parse_vless(s).map_err(|e| format!("VLESS parse failed: {}", e))?;
         config::save_vless_config(&v, config::InboundMode::Tun)
@@ -195,7 +198,7 @@ pub async fn tun_connect(
         let urls = if s.starts_with("https://") || s.starts_with("http://") {
             vec![s.to_string()]
         } else {
-            config::proteus_config_urls(s)
+            config::proteus_config_urls(s, mode.as_deref())
         };
         match config::fetch_and_cache_first_available_with_mode(&urls, config::InboundMode::Tun)
             .await

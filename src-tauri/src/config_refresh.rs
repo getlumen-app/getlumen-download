@@ -20,13 +20,21 @@ pub fn refresh_source(key: &str) -> Result<RefreshSource, String> {
     }
     // Same normalization as connect: our own subscription URLs collapse to the
     // bare key so the refresh goes through the config gateway, not a raw backend.
+    // A pinned `?mode=` (e.g. a Russia-only profile) survives the collapse.
+    let mode = crate::extract_proteus_mode(raw);
     if let Some(extracted) = crate::extract_proteus_key(raw) {
-        return Ok(RefreshSource::Urls(crate::config::proteus_config_urls(&extracted)));
+        return Ok(RefreshSource::Urls(crate::config::proteus_config_urls(
+            &extracted,
+            mode.as_deref(),
+        )));
     }
     match crate::detect_input_type(raw) {
         "vless" | "hy2" => Ok(RefreshSource::Static),
         "subscription_url" => Ok(RefreshSource::Urls(vec![raw.to_string()])),
-        _ => Ok(RefreshSource::Urls(crate::config::proteus_config_urls(raw))),
+        _ => Ok(RefreshSource::Urls(crate::config::proteus_config_urls(
+            raw,
+            mode.as_deref(),
+        ))),
     }
 }
 
@@ -66,6 +74,21 @@ mod tests {
                 assert!(!urls.is_empty());
                 assert!(urls[0].contains("sub=TestKey0123456789"));
                 assert!(urls[0].contains("format=json-text"));
+            }
+            other => panic!("expected Urls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscription_url_with_profile_mode_keeps_the_mode() {
+        match refresh_source(
+            "https://config.getlumen.download/proteus-sub?sub=TestKey0123456789&mode=russia",
+        )
+        .unwrap()
+        {
+            RefreshSource::Urls(urls) => {
+                assert!(urls.iter().all(|u| u.contains("mode=russia")));
+                assert!(urls.iter().all(|u| u.contains("sub=TestKey0123456789")));
             }
             other => panic!("expected Urls, got {other:?}"),
         }

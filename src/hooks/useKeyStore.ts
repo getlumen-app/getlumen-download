@@ -24,7 +24,12 @@ export function detectType(raw: string): KeyType {
   const s = raw.trim();
   if (s.startsWith("vless://")) return "vless";
   if (s.startsWith("hy2://") || s.startsWith("hysteria2://")) return "hy2";
-  if (s.startsWith("https://") || s.startsWith("http://")) return "subscription_url";
+  if (s.startsWith("https://") || s.startsWith("http://")) {
+    // Our own subscription endpoints are Proteus profiles even as URLs —
+    // including mode-pinned ones like proteus-sub?sub=KEY&mode=russia.
+    if (/proteus-sub\?[&\w=-]*sub=|\/sub\/[\w-]{8,}/.test(s)) return "proteus";
+    return "subscription_url";
+  }
   return "proteus";
 }
 
@@ -65,7 +70,18 @@ export function defaultNameFor(raw: string, type: KeyType): string {
       return "Subscription";
     }
   }
-  // Proteus: 4-char prefix + last 4
+  // Proteus: a subscription URL may pin a server-side mode (?mode=russia) —
+  // that mode IS the profile's purpose, so name it after the mode.
+  const modeMatch = s.match(/[?&]mode=([a-z0-9-]{2,24})/i);
+  if (modeMatch) return `Proteus — ${modeMatch[1]}`;
+  if (s.startsWith("https://") || s.startsWith("http://")) {
+    try {
+      return new URL(s).hostname;
+    } catch {
+      return "Proteus";
+    }
+  }
+  // Bare key: 4-char prefix + last 4
   if (s.length > 8) return `Proteus ${s.slice(0, 4)}…${s.slice(-4)}`;
   return "Proteus key";
 }

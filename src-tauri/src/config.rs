@@ -52,16 +52,24 @@ const CONFIG_DNS_PINS: &[(&str, &[&str])] = &[(
     &["104.21.75.98:443", "172.67.220.94:443"],
 )];
 
-pub fn proteus_config_urls(sub_key: &str) -> Vec<String> {
+pub fn proteus_config_urls(sub_key: &str, mode: Option<&str>) -> Vec<String> {
     let key = sub_key.trim();
+    // Server-side profile mode (e.g. "russia" for an RU-only egress set).
+    // Carried on both endpoints so a worker outage cannot silently fall back
+    // to the default geo-split profile.
+    let mode_qs = match mode {
+        Some(m) if !m.is_empty() => format!("&mode={}", m),
+        _ => String::new(),
+    };
     let primary = format!(
-        "{}/proteus-sub?sub={}&format=json-text",
+        "{}/proteus-sub?sub={}&format=json-text{}",
         config_base_url().trim_end_matches('/'),
-        key
+        key,
+        mode_qs
     );
     let fallback = format!(
-        "{}/proteus-sub?sub={}&format=json-text",
-        PROTEUS_CONFIG_FALLBACK_BASE, key
+        "{}/proteus-sub?sub={}&format=json-text{}",
+        PROTEUS_CONFIG_FALLBACK_BASE, key, mode_qs
     );
     let mut urls = vec![primary, fallback];
     urls.dedup();
@@ -3467,7 +3475,7 @@ mod tests {
 
     #[test]
     fn proteus_config_urls_include_backend_fallback() {
-        let urls = proteus_config_urls("test-sub-key");
+        let urls = proteus_config_urls("test-sub-key", None);
         assert_eq!(urls.len(), 2);
         assert_eq!(
             urls[0],
@@ -3477,6 +3485,19 @@ mod tests {
             urls[1],
             "https://primary-production-1d1cf.up.railway.app/webhook/proteus-sub?sub=test-sub-key&format=json-text"
         );
+    }
+
+    #[test]
+    fn proteus_config_urls_carry_profile_mode_on_both_endpoints() {
+        let urls = proteus_config_urls("test-sub-key", Some("russia"));
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].ends_with("&mode=russia"));
+        assert!(urls[1].ends_with("&mode=russia"));
+        assert!(urls[0].contains("format=json-text&mode=russia"));
+        assert!(urls[1].contains("format=json-text&mode=russia"));
+        // Empty mode behaves like no mode at all.
+        let urls = proteus_config_urls("test-sub-key", Some(""));
+        assert!(!urls[0].contains("mode="));
     }
 
     #[test]
