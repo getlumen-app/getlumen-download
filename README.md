@@ -84,13 +84,13 @@ Lumen.app (Tauri 2.x)
 
 - [Node.js](https://nodejs.org/) 20+
 - [Rust](https://rustup.rs/) (stable)
-- [sing-box](https://github.com/SagerNet/sing-box) v1.11.8 binary in `bin/`
+- [sing-box](https://github.com/SagerNet/sing-box) v1.14.0 binary in `bin/`
 
 ### Build sing-box from source
 
 ```bash
 cd /tmp
-git clone --depth 1 --branch v1.11.8 https://github.com/SagerNet/sing-box.git
+git clone --depth 1 --branch v1.14.0 https://github.com/SagerNet/sing-box.git
 cd sing-box
 go build -tags "with_quic,with_utls,with_clash_api,with_gvisor" -o sing-box-bin ./cmd/sing-box
 mkdir -p <project>/bin && cp sing-box-bin <project>/bin/sing-box
@@ -204,7 +204,7 @@ Font: Inter (UI) + JetBrains Mono (data).
 | UI | React 19 + TypeScript |
 | Desktop | Tauri 2.x (Rust) |
 | Build | Vite 8 |
-| VPN Core | sing-box v1.11.8 |
+| VPN Core | sing-box v1.14.0 |
 | Proxy API | Clash API (localhost) |
 
 ## License

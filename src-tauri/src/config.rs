@@ -1071,18 +1071,31 @@ fn strip_client_side_metadata(config: &mut serde_json::Value) {
 /// telegram-cdn, whitelist-auto…) keep their own urltests and remain
 /// pin-independent by design.
 fn ensure_location_selector(config: &mut serde_json::Value) {
-    let already = config
-        .get("outbounds")
-        .and_then(|o| o.as_array())
-        .map(|arr| {
-            arr.iter().any(|o| {
-                o.get("tag").and_then(|t| t.as_str()) == Some("proxy")
-                    && o.get("type").and_then(|t| t.as_str()) == Some("selector")
-            })
-        })
-        .unwrap_or(false);
-    if already {
-        return;
+    // If the server already ships a `proxy` selector (full-config path), we
+    // still merge the pin-only extras it doesn't know about — including the
+    // `direct` passthrough pin — instead of leaving its member list untouched.
+    if let Some(arr) = config.get("outbounds").and_then(|o| o.as_array()) {
+        let already_idx = arr.iter().position(|o| {
+            o.get("tag").and_then(|t| t.as_str()) == Some("proxy")
+                && o.get("type").and_then(|t| t.as_str()) == Some("selector")
+        });
+        if let Some(idx) = already_idx {
+            let has_direct_leaf = arr.iter().any(|o| {
+                o.get("tag").and_then(|t| t.as_str()) == Some("direct")
+                    && o.get("type").and_then(|t| t.as_str()) == Some("direct")
+            });
+            if has_direct_leaf {
+                if let Some(list) = config
+                    .pointer_mut(&format!("/outbounds/{}/outbounds", idx))
+                    .and_then(|m| m.as_array_mut())
+                {
+                    if !list.iter().any(|m| m.as_str() == Some("direct")) {
+                        list.push(serde_json::json!("direct"));
+                    }
+                }
+            }
+            return;
+        }
     }
 
     let Some(final_tag) = config
@@ -1172,6 +1185,21 @@ fn ensure_location_selector(config: &mut serde_json::Value) {
             {
                 members.push(serde_json::json!(tag));
             }
+        }
+    }
+
+    // Direct passthrough pin: TUN and route rules stay up (RU-bound rules keep
+    // their msk-* egress) while unmatched traffic exits on the local ISP. This
+    // is the right mode on clean/trusted networks outside RF — e.g. Anthropic/
+    // Claude, whose claude.ai endpoints Cloudflare-challenge on datacenter
+    // egress IPs. Listed last so it cannot shadow the auto group by accident.
+    if let Some(arr) = config.get("outbounds").and_then(|o| o.as_array()) {
+        let has_direct_leaf = arr.iter().any(|o| {
+            o.get("tag").and_then(|t| t.as_str()) == Some("direct")
+                && o.get("type").and_then(|t| t.as_str()) == Some("direct")
+        });
+        if has_direct_leaf && !members.iter().any(|m| m.as_str() == Some("direct")) {
+            members.push(serde_json::json!("direct"));
         }
     }
 
@@ -1928,6 +1956,10 @@ fn build_config_from_server(
     let geo_members = geo_selector_members(&proxy_names);
     let mut selector_members = vec!["proxy-auto".to_string()];
     selector_members.extend(geo_members);
+    // Direct passthrough pin — same semantics as ensure_location_selector:
+    // full routing table stays active, unmatched traffic exits on the local
+    // ISP (clean-egress networks where a DC exit only adds latency/risk).
+    selector_members.push("direct".to_string());
 
     let cache_path = data_dir().join("cache.db");
 
@@ -2901,6 +2933,12 @@ mod tests {
             .iter().any(|m| m == &serde_json::json!("msk-via-netcup")));
         assert!(!auto["outbounds"].as_array().unwrap()
             .iter().any(|m| m == &serde_json::json!("msk-via-netcup")));
+        // Direct passthrough pin is offered last (clean-egress mode): TUN and
+        // RU-bound rules stay up, unmatched traffic exits on the local ISP.
+        assert_eq!(sel["outbounds"].as_array().unwrap().last().unwrap(),
+            &serde_json::json!("direct"));
+        assert!(!auto["outbounds"].as_array().unwrap()
+            .iter().any(|m| m == &serde_json::json!("direct")));
         // Idempotent — a second pass must not double-wrap.
         let once = cfg.clone();
         migrate_legacy_singbox_config(&mut cfg);
@@ -2919,6 +2957,37 @@ mod tests {
         ensure_location_selector(&mut leaf);
         assert_eq!(leaf.pointer("/route/final").unwrap(), "exit-a");
         assert_eq!(leaf.pointer("/outbounds").unwrap().as_array().unwrap().len(), 1);
+    }
+
+    /// Server-shipped `proxy` selector (full-config path): the app must still
+    /// merge the `direct` passthrough pin into its member list — otherwise
+    /// clean-egress mode is unreachable on configs the server fully owns.
+    #[test]
+    fn location_selector_merges_direct_into_server_selector() {
+        let mut cfg = serde_json::json!({
+            "outbounds": [
+                {"type": "vless", "tag": "exit-a"},
+                {"type": "direct", "tag": "direct"},
+                {"type": "block", "tag": "block"},
+                {"type": "selector", "tag": "proxy",
+                 "outbounds": ["exit-a"], "default": "exit-a"}
+            ],
+            "route": {"final": "proxy"}
+        });
+        ensure_location_selector(&mut cfg);
+        let sel = cfg.pointer("/outbounds").unwrap().as_array().unwrap().iter()
+            .find(|o| o.get("tag") == Some(&serde_json::json!("proxy"))).unwrap();
+        assert_eq!(sel["outbounds"].as_array().unwrap().last().unwrap(),
+            &serde_json::json!("direct"));
+        // Idempotent — a second pass must not duplicate the pin.
+        ensure_location_selector(&mut cfg);
+        let sel = cfg.pointer("/outbounds").unwrap().as_array().unwrap().iter()
+            .find(|o| o.get("tag") == Some(&serde_json::json!("proxy"))).unwrap();
+        assert_eq!(
+            sel["outbounds"].as_array().unwrap().iter()
+                .filter(|m| *m == &serde_json::json!("direct")).count(),
+            1
+        );
     }
 
     /// Dev harness: migrates a real fetched Proteus config placed at
@@ -3203,9 +3272,10 @@ mod tests {
                 "izhevsk-via-firstbyte",
                 "msk-via-netcup",
                 "msk-via-firstbyte",
+                "direct",
             ],
-            "selector members must be Auto + geo pins; USA pin is FirstByte only \
-             and Germany pin avoids relay-eu-443. Got {:?}",
+            "selector members must be Auto + geo pins + direct last; USA pin is \
+             FirstByte only and Germany pin avoids relay-eu-443. Got {:?}",
             sel
         );
 
