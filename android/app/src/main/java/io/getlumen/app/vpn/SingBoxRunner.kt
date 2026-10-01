@@ -44,10 +44,20 @@ class SingBoxRunner(
         process = proc
         readerThread = Thread({
             proc.inputStream.bufferedReader().forEachLine { line ->
+                if (isNoisyLine(line)) return@forEachLine
                 onLog("sing-box: $line")
             }
         }, "singbox-log").also { it.start() }
     }
+
+    /**
+     * Inside an app sandbox the netlink route dump is denied, so the
+     * interface monitor retries once a second forever — a steady stream of
+     * identical ERROR lines that is cosmetic only (dialers simply fall back
+     * to the default path). Hide it from the in-app log.
+     */
+    private fun isNoisyLine(line: String): Boolean =
+        line.contains("netlinkrib") || line.contains("network monitor unavailable")
 
     /** Waits until the mixed SOCKS/HTTP inbound accepts a TCP connection. */
     fun awaitPort(port: Int, timeoutMs: Long): Boolean {

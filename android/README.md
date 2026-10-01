@@ -18,14 +18,15 @@ cd android
 # unsigned when LUMEN_KEYSTORE_* env vars are unset; otherwise signed
 ```
 
-APK lands at `app/build/outputs/apk/release/app-release.apk` — sideloadable,
+APK lands at `app/build/outputs/apk/release/app-release.apk` — arm64-v8a only (the
+Telegram Bot API upload cap is 50MB), sideloadable,
 Google Play not required.
 
 ## Bundled native binaries
 
 - `app/src/main/jniLibs/*/libsingbox.so` — sing-box v1.14.0, built with
-  `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags "with_utls,with_quic,with_clash_api" -trimpath -ldflags="-s -w" ./cmd/sing-box`
-  (and `GOARCH=arm GOARM=7` for armeabi-v7a). Executed from
+  `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags "with_utls,with_quic,with_clash_api" -trimpath -ldflags="-s -w" ./cmd/sing-box`.
+  Executed from
   `nativeLibraryDir`, which is the only app-writable path Android lets
   you `exec()` from; `android:extractNativeLibs="true"` is required.
   One source patch (`route/network.go`): when `auto_detect_interface` is off,
