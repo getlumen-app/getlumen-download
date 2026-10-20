@@ -73,6 +73,25 @@ pub async fn start_sidecars_from_cached_manifest(
     start_sidecars(app, &links).await
 }
 
+/// Explicit Whitelist must be ready before sing-box starts downloading rule
+/// sets or accepting traffic. Refuse another profile's offline cached config.
+pub async fn start_requested_whitelist(
+    app: &tauri::AppHandle,
+    key: &str,
+    path: &Path,
+) -> Result<(), String> {
+    if crate::extract_proteus_mode(key).as_deref() != Some("whitelist") {
+        return Ok(());
+    }
+    let body = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let prepared: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    if prepared.pointer("/route/final").and_then(|v| v.as_str()) != Some("telemost-local") {
+        return Err("Whitelist config unavailable; refresh this profile before connecting".into());
+    }
+    start_sidecars_from_cached_manifest(app).await?;
+    Ok(())
+}
+
 /// `room_links` is an ordered candidate list, not a fixed assignment: each
 /// SOCKS port walks the list until a joiner passes the data-plane probe
 /// (SOCKS CONNECT + a real response byte through the tunnel). The probe is
@@ -158,6 +177,7 @@ async fn start_one_sidecar(
     let mut command = wbstream::silent_command(&joiner);
     let (vp8_fps, vp8_batch) = vp8_pacing_from_env();
     command.args([
+        "--reliable",
         "--tm-link",
         room_link,
         "--name",
@@ -389,6 +409,23 @@ fn find_joiner(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn sidecar_requests_reliable_video_transport() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lumen-sidecar-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("joiner");
+        let args_file = dir.join("args");
+        std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 1\n", args_file.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = start_one_sidecar(&fake, "https://telemost.yandex.ru/j/synthetic", 19198, 98).await;
+        assert!(result.is_err(), "fixture must exit without opening a listener");
+        let args = std::fs::read_to_string(args_file).unwrap();
+        assert!(args.lines().any(|arg| arg == "--reliable"),
+            "lossy video frames must not be forwarded as an unprotected TCP byte stream");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Mock SOCKS5 server: answers the greeting, grants CONNECT, then either
     /// serves one response byte or goes silent — mirroring a live vs dead
