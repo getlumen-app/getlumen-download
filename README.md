@@ -179,6 +179,15 @@ contract:
 - mark accounts as `needs_reauth` when WB requires SMS/OTP/CAPTCHA/manual login;
 - rotate rooms across healthy accounts and exclude rate-limited/revoked accounts.
 
+### Dedicated Whitelist profiles on macOS
+
+A subscription with `mode=whitelist` starts the bundled Telemost carrier before
+the VPN core, in both System Proxy and TUN modes. Payload traffic, DNS detours,
+and rule-set downloads use the local carrier rather than a remote relay IP.
+Video transport uses KCP reliability so dropped frames do not corrupt TCP/TLS
+streams. Connection failure stops the carrier processes; a cached ordinary
+profile cannot silently substitute for the requested Whitelist profile.
+
 ### Environment variables
 
 | Variable | Default | Description |

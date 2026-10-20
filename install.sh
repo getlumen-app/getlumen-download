@@ -98,7 +98,7 @@ fi
 
 log "Mounting DMG"
 mount_output="$(hdiutil attach "$dmg_path" -nobrowse -noautoopen 2>&1)"
-MOUNT_POINT="$(printf '%s\n' "$mount_output" | awk '/\\/Volumes\\// {print $NF; exit}')"
+MOUNT_POINT="$(printf '%s\n' "$mount_output" | awk -F '\t' 'index($0, "/Volumes/") {print $NF; exit}')"
 
 [ -n "$MOUNT_POINT" ] && [ -d "$MOUNT_POINT" ] || fail "failed to mount DMG"
 [ -d "$MOUNT_POINT/$APP_NAME.app" ] || fail "DMG does not contain $APP_NAME.app"

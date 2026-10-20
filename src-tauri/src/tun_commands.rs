@@ -5,7 +5,7 @@ use crate::tun_helper as tun_runtime;
 #[cfg(target_os = "windows")]
 use crate::tun_windows as tun_runtime;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 use tun_runtime::{Request, Response};
 
@@ -159,6 +159,19 @@ pub async fn tun_connect(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<u32, String> {
+    let result = tun_connect_inner(key, app, state).await;
+    #[cfg(target_os = "macos")]
+    if result.is_err() {
+        crate::telemost::stop_sidecars();
+    }
+    result
+}
+
+async fn tun_connect_inner(
+    key: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<u32, String> {
     // TUN and System Proxy are mutually exclusive. Stop the per-user proxy
     // runtime before asking Windows/macOS for privileged TUN routing.
     crate::proxy::disable_system_proxy()
@@ -241,6 +254,8 @@ pub async fn tun_connect(
         }
     }
     let config_path = config::tun_config_file_path().to_string_lossy().to_string();
+    #[cfg(target_os = "macos")]
+    crate::telemost::start_requested_whitelist(&app, &key, Path::new(&config_path)).await?;
 
     // 2. Ask helper to start
     let singbox_path = bundled_singbox_path(&app)?;

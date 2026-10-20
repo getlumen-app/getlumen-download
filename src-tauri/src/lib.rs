@@ -598,10 +598,25 @@ async fn connect(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let result = connect_inner(key, app, state).await;
+    #[cfg(target_os = "macos")]
+    if result.is_err() {
+        telemost::stop_sidecars();
+    }
+    result
+}
+
+async fn connect_inner(
+    key: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     // 1. Build config (auto-detects vless / sub URL / Proteus key)
     let promotion_urls = prepare_proxy_config(&key).await?;
 
     let path = config::config_file_path();
+    #[cfg(target_os = "macos")]
+    telemost::start_requested_whitelist(&app, &key, &path).await?;
     let path_str = path.to_string_lossy().to_string();
     *state.config_path.lock().unwrap() = Some(path_str.clone());
 

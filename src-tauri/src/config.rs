@@ -1079,6 +1079,26 @@ fn strip_client_side_metadata(config: &mut serde_json::Value) {
 /// telegram-cdn, whitelist-auto…) keep their own urltests and remain
 /// pin-independent by design.
 fn ensure_location_selector(config: &mut serde_json::Value) {
+    #[cfg(target_os = "macos")]
+    if config.pointer("/route/final").and_then(|v| v.as_str()) == Some("firstbyte-tm-telemost") {
+        // A dedicated whitelist profile must enter the carrier locally: a
+        // remote relay IP can itself be blocked by the operator's whitelist.
+        config["route"]["final"] = serde_json::json!("telemost-local");
+        for (path, field) in [
+            ("/route/rules", "outbound"),
+            ("/route/rule_set", "download_detour"),
+            ("/dns/servers", "detour"),
+        ] {
+            if let Some(items) = config.pointer_mut(path).and_then(|v| v.as_array_mut()) {
+                for item in items {
+                    if item.get(field).and_then(|v| v.as_str()) == Some("firstbyte-tm-telemost") {
+                        item[field] = serde_json::json!("telemost-local");
+                    }
+                }
+            }
+        }
+        return;
+    }
     // If the server already ships a `proxy` selector (full-config path), we
     // still merge the pin-only extras it doesn't know about — including the
     // `direct` passthrough pin — instead of leaving its member list untouched.
@@ -2965,6 +2985,32 @@ mod tests {
         ensure_location_selector(&mut leaf);
         assert_eq!(leaf.pointer("/route/final").unwrap(), "exit-a");
         assert_eq!(leaf.pointer("/outbounds").unwrap().as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn whitelist_profile_routes_payload_and_rule_downloads_through_local_carrier() {
+        let mut config = serde_json::json!({
+            "outbounds": [
+                {"type": "vless", "tag": "firstbyte-tm-telemost"},
+                {"type": "direct", "tag": "direct"}
+            ],
+            "route": {
+                "final": "firstbyte-tm-telemost",
+                "rules": [
+                    {"domain": ["example.com"], "outbound": "firstbyte-tm-telemost"},
+                    {"ip_is_private": true, "outbound": "direct"}
+                ],
+                "rule_set": [{"tag": "example", "download_detour": "firstbyte-tm-telemost"}]
+            },
+            "dns": {"servers": [{"tag": "dns-proxy", "detour": "firstbyte-tm-telemost"}]}
+        });
+        ensure_location_selector(&mut config);
+        assert_eq!(config["route"]["final"], "telemost-local");
+        assert_eq!(config["route"]["rules"][0]["outbound"], "telemost-local");
+        assert_eq!(config["route"]["rules"][1]["outbound"], "direct");
+        assert_eq!(config["route"]["rule_set"][0]["download_detour"], "telemost-local");
+        assert_eq!(config["dns"]["servers"][0]["detour"], "telemost-local");
     }
 
     /// Server-shipped `proxy` selector (full-config path): the app must still

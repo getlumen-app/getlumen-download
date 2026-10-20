@@ -1,10 +1,23 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 
 const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const scripts = pkg.scripts || {};
 const installer = await readFile(new URL("../install.sh", import.meta.url), "utf8");
 const indexHtml = await readFile(new URL("../index.html", import.meta.url), "utf8");
+
+const mountAssignment = installer.split("\n").find(line => line.startsWith('MOUNT_POINT="$(printf'));
+assert.ok(mountAssignment, "installer must extract the mounted volume path");
+for (const mountPath of ["/Volumes/Lumen", "/Volumes/Lumen Update", ""]) {
+  const mountOutput = "/dev/disk4\tGUID_partition_scheme\n"
+    + (mountPath ? `/dev/disk4s1\tApple_HFS\t${mountPath}\n` : "");
+  const result = spawnSync("bash", ["-c", `${mountAssignment}\nprintf '%s' "$MOUNT_POINT"`], {
+    encoding: "utf8", env: { ...process.env, mount_output: mountOutput },
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, mountPath, "mount parsing must preserve the complete volume path");
+}
 
 assert.ok(scripts["release:verify"], "package.json must expose release:verify");
 assert.match(
