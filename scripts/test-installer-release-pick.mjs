@@ -31,6 +31,11 @@ case "$url" in
 esac
 `);
   writeFileSync(join(bin, "uname"), `#!/bin/bash\ncase "$1" in -s) echo Darwin ;; *) echo ${arch} ;; esac\n`);
+  // macOS-only tools the installer checks up front; CI runs on Linux. The run never
+  // reaches them (the fake DMG download fails first), they only need to exist.
+  for (const tool of ["hdiutil", "file"]) writeFileSync(join(bin, tool), "#!/bin/bash\nexit 0\n");
+  chmodSync(join(bin, "hdiutil"), 0o755);
+  chmodSync(join(bin, "file"), 0o755);
   chmodSync(join(bin, "curl"), 0o755);
   chmodSync(join(bin, "uname"), 0o755);
   return spawnSync("bash", [INSTALL, "--dry-run"], {
