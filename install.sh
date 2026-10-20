@@ -60,19 +60,22 @@ log "Lumen installer"
 log "Repository: $REPO"
 log "Architecture: $ARCH_SUFFIX"
 
-release_json="$TMPDIR_PATH/latest.json"
+# The newest release that carries the macOS DMG — NOT releases/latest: an Android
+# release published as "latest" left this installer with nothing to install
+# (01.10–20.10.2026). The list is newest-first, so the first DMG match wins.
+release_json="$TMPDIR_PATH/releases.json"
 curl -fsSL --connect-timeout 10 --max-time 30 \
-  "https://api.github.com/repos/${REPO}/releases/latest" \
+  "https://api.github.com/repos/${REPO}/releases?per_page=30" \
   -o "$release_json"
 
 download_url="$(
-  grep '"browser_download_url"' "$release_json" \
-    | grep -E "_${ARCH_SUFFIX}\\.dmg\"" \
+  { grep '"browser_download_url"' "$release_json" || true; } \
+    | { grep -E "_${ARCH_SUFFIX}\\.dmg\"" || true; } \
     | head -1 \
     | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/'
 )"
 
-[ -n "$download_url" ] || fail "could not find ${ARCH_SUFFIX} DMG in latest release"
+[ -n "$download_url" ] || fail "could not find ${ARCH_SUFFIX} DMG in any recent release"
 
 dmg_name="$(basename "$download_url")"
 dmg_path="$TMPDIR_PATH/$dmg_name"
