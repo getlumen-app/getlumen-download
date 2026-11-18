@@ -51,12 +51,7 @@ class TelemostJoiner(
         val binary = File(nativeLibDir, "librelay.so")
         check(binary.exists()) { "librelay.so missing" }
 
-        joinJson = JSONObject().apply {
-            put("joinLink", joinLink)
-            put("displayName", displayName)
-            put("vp8Fps", 60)
-            put("vp8Batch", 120)
-        }.toString()
+        joinJson = buildJoinJson(joinLink, displayName)
 
         isRunning = true
         readerThread = Thread({
@@ -171,5 +166,18 @@ class TelemostJoiner(
         }
         readerThread?.interrupt()
         readerThread = null
+    }
+
+    companion object {
+        /** Join payload the headless joiner reads from stdin. */
+        fun buildJoinJson(joinLink: String, displayName: String): String =
+            JSONObject().apply {
+                put("joinLink", joinLink)
+                put("displayName", displayName)
+                put("vp8Fps", 60)
+                put("vp8Batch", 120)
+                // KCP over the VP8 tracks: same as desktop --reliable (v2.6.10).
+                put("reliable", true)
+            }.toString()
     }
 }
