@@ -12,6 +12,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidbind.Androidbind
+import io.getlumen.app.BuildConfig
 import io.getlumen.app.LumenApp
 import io.getlumen.app.MainActivity
 import io.getlumen.app.R
@@ -57,7 +58,8 @@ class LumenVpnService : VpnService() {
         const val ACTION_STOP = "io.getlumen.app.STOP_VPN"
 
         private const val CONFIG_BASE = "https://config.getlumen.download"
-        private const val USER_AGENT = "Lumen/1.0.0-android"
+        /** Sent on every config/manifest fetch; the server records it in Client Info. */
+        internal val USER_AGENT = "Lumen/${BuildConfig.VERSION_NAME}-android"
         private const val MAX_ROOM_ATTEMPTS = 8
 
         fun requestStop(context: Context) {

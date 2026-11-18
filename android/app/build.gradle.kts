@@ -13,8 +13,8 @@ android {
         applicationId = "io.getlumen.app"
         minSdk = 23
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -23,6 +23,10 @@ android {
             // only; every supported modern device uses it.
             abiFilters += setOf("arm64-v8a")
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     signingConfigs {
